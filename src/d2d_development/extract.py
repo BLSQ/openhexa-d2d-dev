@@ -19,7 +19,7 @@ class DataElementsExtractor:
         period: str,
         output_dir: Path,
         filename: str | None = None,
-        **kwargs,
+        **kwargs,  # noqa: ANN003
     ) -> Path | None:
         """Download and handle data extracts for the specified period, saving them to the output directory.
 
@@ -35,6 +35,8 @@ class DataElementsExtractor:
             Directory where extracted data files will be saved.
         filename : str | None
             Optional filename for the extracted data file. If None, a default name will be used.
+        kwargs : dict
+            Additional keyword arguments for data retrieval, such as `last_updated` for filtering data.
 
         Returns
         -------
@@ -60,10 +62,10 @@ class DataElementsExtractor:
         except Exception as e:
             raise Exception(f"Extract data elements download error : {e}") from e
 
-    def _retrieve_data(self, data_elements: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:
+    def _retrieve_data(self, data_elements: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:  # noqa: ANN003
         if not self.extractor._valid_dhis2_period_format(period):
             raise ValueError(f"Invalid DHIS2 period format: {period}")
-        last_updated = kwargs.get("last_updated", None)
+        last_updated = kwargs.get("last_updated")
         try:
             response = self.extractor.dhis2_client.data_value_sets.get(
                 data_elements=data_elements,
@@ -90,7 +92,7 @@ class IndicatorsExtractor:
         period: str,
         output_dir: Path,
         filename: str | None = None,
-        **kwargs,
+        **kwargs,  # noqa: ANN003
     ) -> Path | None:
         """Download and handle data extracts for the specified periods, saving them to the output directory.
 
@@ -106,6 +108,8 @@ class IndicatorsExtractor:
             Directory where extracted data files will be saved.
         filename : str | None
             Optional filename for the extracted data file. If None, a default name will be used.
+        kwargs : dict
+            Additional keyword arguments for data retrieval, such as `last_updated` for filtering data.
 
         Returns
         -------
@@ -131,7 +135,7 @@ class IndicatorsExtractor:
         except Exception as e:
             raise Exception(f"Extract indicators download error : {e}") from e
 
-    def _retrieve_data(self, indicators: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:
+    def _retrieve_data(self, indicators: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:  # noqa: ANN003
         if not self.extractor._valid_dhis2_period_format(period):
             raise ValueError(f"Invalid DHIS2 period format: {period}")
 
@@ -165,7 +169,7 @@ class ReportingRatesExtractor:
         period: str,
         output_dir: Path,
         filename: str | None = None,
-        **kwargs,
+        **kwargs,  # noqa: ANN003
     ) -> Path | None:
         """Download and handle data extracts for the specified periods, saving them to the output directory.
 
@@ -181,6 +185,8 @@ class ReportingRatesExtractor:
             Directory where extracted data files will be saved.
         filename : str | None
             Optional filename for the extracted data file. If None, a default name will be used.
+        kwargs : dict
+            Additional keyword arguments for data retrieval, such as `last_updated` for filtering data.
 
         Returns
         -------
@@ -206,7 +212,7 @@ class ReportingRatesExtractor:
         except Exception as e:
             raise Exception(f"Extract reporting rates download error : {e}") from e
 
-    def _retrieve_data(self, reporting_rates: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:
+    def _retrieve_data(self, reporting_rates: list[str], org_units: list[str], period: str, **kwargs) -> pd.DataFrame:  # noqa: ANN003
         if not self.extractor._valid_dhis2_period_format(period):
             raise ValueError(f"Invalid DHIS2 period format: {period}")
         include_cocs = kwargs.get("include_cocs", False)
@@ -274,7 +280,7 @@ class DHIS2Extractor:
         period: str,
         output_dir: Path,
         filename: str | None = None,
-        **kwargs,
+        **kwargs,  # noqa: ANN003
     ) -> Path | None:
         output_dir.mkdir(parents=True, exist_ok=True)
         if filename:
@@ -324,6 +330,9 @@ class DHIS2Extractor:
             The domain of the data if its per period (Agg ex: monthly) or datapoint (Tracker ex: per day):
             - "AGGREGATED": For aggregated data (default).
             - "TRACKER": For tracker data.
+        map_cocs : bool, optional
+            Whether to include category option combo mapping for indicators.
+            *Only applicable if `data_type` is "INDICATOR". Default is False.
 
         Returns
         -------
