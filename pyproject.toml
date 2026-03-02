@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openhexa-d2d-development"
-version = "0.1.1"
+version = "0.2.0"
 description = "OpenHEXA DHIS2 to DHIS2 development utililty library maintained by Bluesquare Data Services team."
 readme = "README.md"
 requires-python = ">=3.11"
