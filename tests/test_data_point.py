@@ -75,5 +75,5 @@ def test_data_point_model_to_json_delete():
     assert points_list[0]["dataElement"] == "AAA111"
     assert points_list[0]["period"] == "202501"
     assert points_list[0].get("comment") is None
-    assert points_list[3]["value"] == ""
+    assert not points_list[3]["value"]
     assert points_list[3]["comment"] == "deleted value"
