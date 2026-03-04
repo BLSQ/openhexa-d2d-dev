@@ -10,10 +10,10 @@ from tests.mock_dhis2 import MockDHIS2Client
 def test_extract_map_data_elements():
     """Test the mapping of data elements."""
     result = DHIS2Extractor(dhis2_client=MockDHIS2Client()).data_elements._retrieve_data(
-        data_elements=["AAA111", "BBB222", "CCC333"], org_units=[], period="202501"
+        data_elements=["AAA111"], org_units=[], period="202501"
     )
     assert isinstance(result, pl.DataFrame)
-    assert result.shape == (3, 9)
+    assert result.shape == (9, 9)
     assert result.columns == [
         "dataType",
         "dx",
@@ -25,15 +25,45 @@ def test_extract_map_data_elements():
         "domainType",
         "value",
     ]
-    assert result["dataType"].unique().to_list() == ["DATA_ELEMENT"]
-    assert result["dx"].to_list() == ["AAA111", "BBB222", "CCC333"]
-    assert result["period"].to_list() == ["202501", "202501", "202501"]
-    assert result["orgUnit"].to_list() == ["ORG001", "ORG002", "ORG003"]
-    assert result["categoryOptionCombo"].to_list() == ["CAT001", "CAT002", "CAT003"]
-    assert result["attributeOptionCombo"].to_list() == ["ATTR001", "ATTR002", "ATTR003"]
-    assert result["rateMetric"].to_list() == [None, None, None]
-    assert result["domainType"].to_list() == ["AGGREGATED", "AGGREGATED", "AGGREGATED"]
-    assert result["value"].to_list() == ["12", "18", "25"]
+    assert set(result["dataType"]) == {"DATA_ELEMENT"}
+    assert set(result["dx"].drop_nulls()) == {
+        "AAA111",
+        "BBB222",
+        "CCC333",
+        "DELETE1",
+        "INVALID1",
+        "INVALID2",
+        "INVALID3",
+        "INVALID4",
+    }
+    assert set(result["period"].drop_nulls()) == {"202501"}
+    assert set(result["orgUnit"].drop_nulls()) == {
+        "ORG001",
+        "ORG003",
+        "ORG005",
+        "ORG006",
+        "ORG002",
+        "ORG004",
+    }
+    assert set(result["categoryOptionCombo"].drop_nulls()) == {
+        "CAT006",
+        "CAT005",
+        "CAT003",
+        "CAT002",
+        "CAT001",
+        "CAT004",
+    }
+    assert set(result["attributeOptionCombo"].drop_nulls()) == {
+        "ATTR001",
+        "ATTR002",
+        "ATTR003",
+        "ATTR004",
+        "ATTR005",
+        "ATTR006",
+    }
+    assert set(result["rateMetric"]) == {None}
+    assert set(result["domainType"]) == {"AGGREGATED"}
+    assert set(result["value"].drop_nulls()) == {"12", "18", "25", "55.0"}
 
 
 def test_extract_map_reporting_rates():

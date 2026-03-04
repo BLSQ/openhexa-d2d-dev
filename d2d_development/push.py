@@ -2,11 +2,12 @@ import json
 import logging
 
 import pandas as pd
+import polars as pl
 import requests
 from openhexa.sdk import current_run
 from openhexa.toolbox.dhis2 import DHIS2
 
-from .data_models import DataPoint
+from .data_models import DataPointModel
 
 
 class DHIS2Pusher:
@@ -18,49 +19,65 @@ class DHIS2Pusher:
         import_strategy: str = "CREATE_AND_UPDATE",
         dry_run: bool = True,
         max_post: int = 500,
+        logging_interval: int = 50000,
+        mandatory_fields: list[str] | None = None,
         logger: logging.Logger | None = None,
     ):
         self.dhis2_client = dhis2_client
+
         if import_strategy not in {"CREATE", "UPDATE", "CREATE_AND_UPDATE"}:
             raise ValueError("Invalid import strategy (use 'CREATE', 'UPDATE' or 'CREATE_AND_UPDATE')")
+
+        if mandatory_fields is None:
+            self.mandatory_fields = ["dx", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
+        else:
+            self.mandatory_fields = mandatory_fields
+
         self.import_strategy = import_strategy
         self.dry_run = dry_run
         self.max_post = max_post
+        self.logging_interval = logging_interval
         self.summary = {}
         self._reset_summary()
         self.logger = logger if logger else logging.getLogger(__name__)
 
     def push_data(
         self,
-        df_data: pd.DataFrame,
+        df_data: pd.DataFrame | pl.DataFrame,
     ) -> None:
         """Push formatted data to DHIS2."""
+        if isinstance(df_data, pd.DataFrame):
+            df_data = pl.from_pandas(df_data)
+
         valid, to_delete, to_ignore = self._classify_data_points(df_data)
 
         self._push_valid(valid)
-        self._push_removals(to_delete)
+        self._push_to_delete(to_delete)
         self._log_ignored_or_na(to_ignore)
 
-    def _classify_data_points(self, data_values: pd.DataFrame) -> tuple[list, list, list]:
-        if data_values.empty:
+    def _classify_data_points(self, data_points: pl.DataFrame) -> tuple[list, list, list]:
+        if data_points.height == 0:
             current_run.log_warning("No data to push.")
             return [], [], []
 
-        valid, to_delete, not_valid = [], [], []
+        # Valid data points have all mandatory fields non-null
+        valid_mask = pl.all_horizontal([pl.col(col).is_not_null() for col in self.mandatory_fields])
+        valid = data_points.filter(valid_mask).select(self.mandatory_fields)
 
-        def classify_row(row: pd.Series):
-            dpoint = DataPoint(row)
-            if dpoint.is_valid():
-                valid.append(dpoint.to_json())
-            elif dpoint.is_to_delete():
-                to_delete.append(dpoint.to_delete_json())
-            else:
-                not_valid.append(row)
+        # Data points to delete have all mandatory fields non-null except 'value' which is null
+        mandatory_fields_without_value = [col for col in self.mandatory_fields if col != "value"]
+        delete_mask = (
+            pl.all_horizontal([pl.col(col).is_not_null() for col in mandatory_fields_without_value])
+            & pl.col("value").is_null()
+        )
+        to_delete = data_points.filter(delete_mask).select(self.mandatory_fields)
 
-        data_values.apply(classify_row, axis=1)
+        # To ignore are those that don't fit either of the above criteria
+        not_valid = data_points.filter(~valid_mask & ~delete_mask).select(self.mandatory_fields)
+
         return valid, to_delete, not_valid
 
-    def _push_valid(self, data_points_valid: list) -> None:
+    def _push_valid(self, data_points_valid: list, logging_interval: int = 50000) -> None:
         """Push valid values to DHIS2."""
         if len(data_points_valid) == 0:
             current_run.log_info("No data to push.")
@@ -69,22 +86,24 @@ class DHIS2Pusher:
         msg = f"Pushing {len(data_points_valid)} data points."
         current_run.log_info(msg)
         self.logger.info(msg)
-
-        self._push_data_points(data_point_list=data_points_valid, logging_interval=50000)
+        self._push_data_points(
+            data_point_list=self._serialize_data_points(data_points_valid), logging_interval=self.logging_interval
+        )
         msg = f"Data points push summary:  {self.summary['import_counts']}"
         current_run.log_info(msg)
         self.logger.info(msg)
         self._log_summary_errors()
 
-    def _push_removals(self, data_points_to_remove: pd.DataFrame) -> None:
-        if len(data_points_to_remove) == 0:
-            # current_run.log_info("No NA data points to push.")
+    def _push_to_delete(self, data_points_to_delete: pl.DataFrame) -> None:
+        if data_points_to_delete.height == 0:
             return
 
-        current_run.log_info(f"Pushing {len(data_points_to_remove)} data points with NA values.")
-        self.logger.info(f"Pushing {len(data_points_to_remove)} data points with NA values.")
-        self._log_ignored_or_na(data_points_to_remove, is_na=True)
-        self._push_data_points(data_point_list=data_points_to_remove, logging_interval=50000)
+        current_run.log_info(f"Pushing {len(data_points_to_delete)} data points with NA values.")
+        self.logger.info(f"Pushing {len(data_points_to_delete)} data points with NA values.")
+        self._log_ignored_or_na(data_points_to_delete, is_na=True)
+        self._push_data_points(
+            data_point_list=self._serialize_data_points(data_points_to_delete), logging_interval=self.logging_interval
+        )
 
         current_run.log_info(f"Data points delete summary: {self.summary['import_counts']}")
         self.logger.info(f"Data points delete summary: {self.summary['import_counts']}")
@@ -94,13 +113,32 @@ class DHIS2Pusher:
         """Logs ignored or NA data points."""
         if len(data_point_list) > 0:
             current_run.log_info(
-                f"{len(data_point_list)} data points will be  {'updated to NA' if is_na else 'ignored'}. "
+                f"{len(data_point_list)} data points will be  {'set to NA' if is_na else 'ignored'}. "
                 "Please check the last execution report for details."
             )
-            self.logger.warning(f"{len(data_point_list)} data points to be {'updated to NA' if is_na else 'ignored'}: ")
+            self.logger.warning(f"{len(data_point_list)} data points to be {'set to NA' if is_na else 'ignored'}: ")
             for i, ignored in enumerate(data_point_list, start=1):
                 row_str = ", ".join(f"{k}={v}" for k, v in ignored.items())
                 self.logger.warning(f"{i}. Data point {'NA' if is_na else 'ignored'}: {row_str}")
+
+    def _serialize_data_points(self, data_points: pl.DataFrame) -> list[dict]:
+        """Convert a Polars DataFrame of data points into a list of dictionaries for DHIS2 API.
+
+        Returns
+        -------
+            list[dict]: A list of dictionaries, each representing a data point formatted for DHIS2.
+        """
+        return [
+            DataPointModel(
+                dataElement=row["dx"],
+                period=row["period"],
+                orgUnit=row["orgUnit"],
+                categoryOptionCombo=row["categoryOptionCombo"],
+                attributeOptionCombo=row["attributeOptionCombo"],
+                value=row["value"],
+            ).to_json()
+            for row in data_points.to_dicts()
+        ]
 
     def _log_summary_errors(self):
         """Logs all the errors in the summary dictionary using the configured logging."""
