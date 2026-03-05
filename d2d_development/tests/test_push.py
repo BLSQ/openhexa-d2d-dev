@@ -3,6 +3,12 @@ from unittest.mock import patch
 import polars as pl
 import pytest
 
+import sys
+import os
+
+os.chdir(r"d2d_development")
+sys.path.insert(0, ".")
+
 from d2d_development.extract import DHIS2Extractor
 from d2d_development.push import DHIS2Pusher
 from tests.mock_dhis2_get import MockDHIS2Client
@@ -101,4 +107,25 @@ def test_push_data_points():
 
     with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
         pusher._push_data_points(valid_data_points)
+        assert pusher.summary["import_counts"]["imported"] == 1
+
+
+def test_push_data_points_de_error():
+    """Test the push of data points to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    invalid_data_points = [
+        {
+            "dataElement": "INVALID_DE",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "12",
+        }
+    ]
+
+    with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
+        pusher._push_data_points(invalid_data_points)
+        print(pusher.summary)
         assert pusher.summary["import_counts"]["imported"] == 1
