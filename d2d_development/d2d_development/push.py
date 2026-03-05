@@ -49,6 +49,13 @@ class DHIS2Pusher:
         if isinstance(df_data, pd.DataFrame):
             df_data = pl.from_pandas(df_data)
 
+        if not isinstance(df_data, pl.DataFrame):
+            raise ValueError("Input data must be a pandas or polars DataFrame.")
+
+        if df_data.height == 0:
+            current_run.log_info("Input DataFrame is empty. No data to push.")
+            return
+
         valid, to_delete, to_ignore = self._classify_data_points(df_data)
 
         self._push_valid(valid)
@@ -56,10 +63,12 @@ class DHIS2Pusher:
         self._log_ignored_or_na(to_ignore)
 
     def _classify_data_points(self, data_points: pl.DataFrame) -> tuple[list, list, list]:
-        if data_points.height == 0:
-            current_run.log_warning("No data to push.")
-            return [], [], []
+        """Classify data points into valid, to delete, and to ignore based on mandatory fields.
 
+        Returns
+        -------
+            tuple: A tuple containing three lists: (valid_data_points, to_delete_data_points, to_ignore_data_points).
+        """
         # Valid data points have all mandatory fields non-null
         valid_mask = pl.all_horizontal([pl.col(col).is_not_null() for col in self.mandatory_fields])
         valid = data_points.filter(valid_mask).select(self.mandatory_fields)
@@ -146,7 +155,7 @@ class DHIS2Pusher:
             for i_e, error in enumerate(errors, start=1):
                 self.logger.error(f"Error response {i_e}: {error}")
 
-    def _post_data_values(self, chunk: list[dict]) -> requests.Response:
+    def _post(self, chunk: list[dict]) -> requests.Response:
         """Send a POST request to DHIS2 for a chunk of data values.
 
         Returns
@@ -174,12 +183,11 @@ class DHIS2Pusher:
         processed_points = 0
         last_logged_at = 0
 
-        # for chunk in self._split_list(data_point_list, self.max_post):
         for chunk_id, chunk in enumerate(self._split_list(data_point_list, self.max_post), start=1):
             r = None
             response = None
             try:
-                r = self._post_data_values(chunk)
+                r = self._post(chunk)
                 r.raise_for_status()
                 response = self._safe_json(r)
 

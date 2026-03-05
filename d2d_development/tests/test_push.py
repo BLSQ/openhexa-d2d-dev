@@ -1,11 +1,38 @@
 from unittest.mock import patch
-
+import pytest
 import polars as pl
+
+import sys
+import os
+
+os.chdir(r"d2d_development")
+sys.path.insert(0, ".")
 
 from d2d_development.extract import DHIS2Extractor
 from d2d_development.push import DHIS2Pusher
 from tests.mock_dhis2_get import MockDHIS2Client
 from tests.mock_dhis2_post import MOCK_DHIS2_OK_RESPONSE, MockDHIS2Response
+
+
+def test_push_no_data_to_push():
+    """Test the push of data points to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
+        pusher.push_data(df_data=pl.DataFrame([]))
+        print(pusher.summary)
+        assert pusher.summary["import_counts"]["imported"] == 0
+
+
+def test_push_wrong_input_type():
+    """Test the push of data points to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+        pusher.push_data(df_data=[])
+    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+        pusher.push_data(df_data="not a dataframe")
+    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+        pusher.push_data(df_data={})
 
 
 def test_push_serialize_data_point_valid():
@@ -67,8 +94,10 @@ def test_push_classify_points():
 
 def test_push_data_points():
     """Test the push of data points to DHIS2."""
-    data_points = DHIS2Extractor(dhis2_client=MockDHIS2Client()).data_elements._retrieve_data(
-        data_elements=["AAA111"], org_units=[], period="202501"
+    data_points = (
+        DHIS2Extractor(dhis2_client=MockDHIS2Client())
+        .data_elements._retrieve_data(data_elements=["AAA111"], org_units=[], period="202501")
+        .slice(0, 1)
     )
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
 
@@ -77,5 +106,25 @@ def test_push_data_points():
 
     with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
         pusher._push_data_points(valid_data_points)
+        assert pusher.summary["import_counts"]["imported"] == 1
+
+
+def test_push_data_points_de_error():
+    """Test the push of data points to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    invalid_data_points = [
+        {
+            "dataElement": "INVALID_DE",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "12",
+        }
+    ]
+
+    with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
+        pusher._push_data_points(invalid_data_points)
         print(pusher.summary)
         assert pusher.summary["import_counts"]["imported"] == 1
