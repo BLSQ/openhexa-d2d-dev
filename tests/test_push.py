@@ -77,5 +77,5 @@ def test_push_data_points():
 
     with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
         pusher._push_data_points(valid_data_points)
-        # Now you can assert on pusher.summary or any other side effect
+        print(pusher.summary)
         assert pusher.summary["import_counts"]["imported"] == 1
