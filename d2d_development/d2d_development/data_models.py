@@ -49,7 +49,7 @@ class DataPointModel:
         dict
             A dictionary with keys corresponding to DHIS2 data value fields.
         """
-        if self.value is None:
+        if self.value is None or (isinstance(self.value, str) and not self.value.strip()):
             return {
                 "dataElement": self.dataElement,
                 "period": self.period,

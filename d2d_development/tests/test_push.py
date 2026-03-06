@@ -2,20 +2,19 @@ from unittest.mock import patch
 
 import polars as pl
 import pytest
-
-import sys
-import os
-
-os.chdir(r"d2d_development")
-sys.path.insert(0, ".")
+import requests
 
 from d2d_development.extract import DHIS2Extractor
 from d2d_development.push import DHIS2Pusher
 from tests.mock_dhis2_get import MockDHIS2Client
 from tests.mock_dhis2_post import (
-    MOCK_DHIS2_OK_RESPONSE,
+    MOCK_DHIS2_ERROR_409_RESPONSE_AOC,
+    MOCK_DHIS2_ERROR_409_RESPONSE_COC,
     MOCK_DHIS2_ERROR_409_RESPONSE_DE,
     MOCK_DHIS2_ERROR_409_RESPONSE_ORG_UNITS,
+    MOCK_DHIS2_ERROR_409_RESPONSE_PERIOD,
+    MOCK_DHIS2_ERROR_503_RESPONSE,
+    MOCK_DHIS2_OK_RESPONSE,
     MockDHIS2Response,
 )
 
@@ -123,6 +122,22 @@ def test_push_data_point():
         }
 
 
+def test_push_data_points_connection_error():
+    """Test the error handling of error 503 to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_503_RESPONSE, status_code=503),
+    ):
+        with pytest.raises(requests.exceptions.HTTPError):
+            pusher._push_data_points([{"dummy_datapoint": "1"}])
+        # After the exception, check the summary
+        assert len(pusher.summary["ERRORS"]) == 1
+        assert pusher.summary["ERRORS"][0]["message"] == "Server error: Service temporarily unavailable"
+        assert pusher.summary["ERRORS"][0]["server_error_code"] == "503"
+
+
 def test_push_data_points_data_element_error():
     """Test the error handling push of data points with wrong data elements."""
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
@@ -156,9 +171,11 @@ def test_push_data_points_data_element_error():
         },
     ]
 
-    # MOCK_DHIS2_ERROR_409_RESPONSE was manually manufactured to simulate a 409 Conflict from DHIS2.
+    # MOCK_DHIS2_ERROR_409_RESPONSE_DE was manually manufactured to simulate a 409 Conflict from DHIS2.
     with patch.object(
-        pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_DE)
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_DE, status_code=409),
     ):
         pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
         assert pusher.summary["import_counts"]["imported"] == 1
@@ -203,9 +220,11 @@ def test_push_data_points_org_unit_error():
         },
     ]
 
-    # MOCK_DHIS2_ERROR_409_RESPONSE was manually manufactured to simulate a Conflict from DHIS2.
+    # MOCK_DHIS2_ERROR_409_RESPONSE_ORG_UNITS was manually manufactured to simulate a Conflict from DHIS2.
     with patch.object(
-        pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_ORG_UNITS)
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_ORG_UNITS, status_code=409),
     ):
         pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
         assert pusher.summary["import_counts"]["imported"] == 1
@@ -215,3 +234,153 @@ def test_push_data_points_org_unit_error():
         assert len(pusher.summary["ERRORS"]) == 2
         assert pusher.summary["ERRORS"][0]["object"] == "INVALID_1_OU"
         assert pusher.summary["ERRORS"][1]["object"] == "INVALID_2_OU"
+
+
+def test_push_data_points_period_error():
+    """Test the error handling push of data points with wrong periods."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    # NOTE: This fake input is just to pass validation and
+    #  match the information manufactured in the response
+    invalid_data_points = [
+        {
+            "dataElement": "VALID",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID",
+            "period": "INVALID_PERIOD_1",
+            "orgUnit": "VALID_OU",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID",
+            "period": "INVALID_PERIOD_2",
+            "orgUnit": "VALID_OU",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+    ]
+
+    # MOCK_DHIS2_ERROR_409_RESPONSE_PERIOD was manually manufactured to simulate a Conflict from DHIS2.
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_PERIOD, status_code=409),
+    ):
+        pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
+        assert pusher.summary["import_counts"]["imported"] == 1
+        assert pusher.summary["import_counts"]["updated"] == 0
+        assert pusher.summary["import_counts"]["ignored"] == 2
+        assert pusher.summary["import_counts"]["deleted"] == 0
+        assert len(pusher.summary["ERRORS"]) == 2
+        assert pusher.summary["ERRORS"][0]["object"] == "INVALID_PERIOD_1"
+        assert pusher.summary["ERRORS"][1]["object"] == "INVALID_PERIOD_2"
+
+
+def test_push_data_points_coc_error():
+    """Test the error handling push of data points with wrong COC."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    # NOTE: This fake input is just to pass validation and
+    #  match the information manufactured in the response
+    invalid_data_points = [
+        {
+            "dataElement": "VALID1",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID2",
+            "period": "202501",
+            "orgUnit": "ORG002",
+            "categoryOptionCombo": "INVALID_COC_1",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID3",
+            "period": "202501",
+            "orgUnit": "ORG003",
+            "categoryOptionCombo": "INVALID_COC_2",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+    ]
+
+    # MOCK_DHIS2_ERROR_409_RESPONSE_COC was manually manufactured to simulate a Conflict from DHIS2.
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_COC, status_code=409),
+    ):
+        pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
+        assert pusher.summary["import_counts"]["imported"] == 1
+        assert pusher.summary["import_counts"]["updated"] == 0
+        assert pusher.summary["import_counts"]["ignored"] == 2
+        assert pusher.summary["import_counts"]["deleted"] == 0
+        assert len(pusher.summary["ERRORS"]) == 2
+        assert pusher.summary["ERRORS"][0]["object"] == "INVALID_COC_1"
+        assert pusher.summary["ERRORS"][1]["object"] == "INVALID_COC_2"
+
+
+def test_push_data_points_aoc_error():
+    """Test the error handling push of data points with wrong AOC."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    # NOTE: This fake input is just to pass validation and
+    #  match the information manufactured in the response
+    invalid_data_points = [
+        {
+            "dataElement": "VALID1",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID2",
+            "period": "202501",
+            "orgUnit": "ORG002",
+            "categoryOptionCombo": "INVALID_AOC_1",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID3",
+            "period": "202501",
+            "orgUnit": "ORG003",
+            "categoryOptionCombo": "INVALID_AOC_2",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+    ]
+
+    # MOCK_DHIS2_ERROR_409_RESPONSE_AOC was manually manufactured to simulate a Conflict from DHIS2.
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_AOC, status_code=409),
+    ):
+        pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
+        assert pusher.summary["import_counts"]["imported"] == 1
+        assert pusher.summary["import_counts"]["updated"] == 0
+        assert pusher.summary["import_counts"]["ignored"] == 2
+        assert pusher.summary["import_counts"]["deleted"] == 0
+        assert len(pusher.summary["ERRORS"]) == 2
+        assert pusher.summary["ERRORS"][0]["object"] == "INVALID_AOC_1"
+        assert pusher.summary["ERRORS"][1]["object"] == "INVALID_AOC_2"
+
+
+# def test_push_data_points_value_format_error(): # 5.000000000001

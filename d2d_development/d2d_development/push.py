@@ -207,6 +207,7 @@ class DHIS2Pusher:
                 self._extract_conflicts(response)
 
             except requests.exceptions.RequestException as e:
+                self._raise_server_errors(r)  # Stop the process if there's a server error
                 response = self._safe_json(r)
                 if response:
                     self._update_import_counts(response)
@@ -233,6 +234,22 @@ class DHIS2Pusher:
             f"{processed_points} / {total_data_points} data points processed."
             f" Final summary: {self.summary['import_counts']}"
         )
+
+    def _raise_server_errors(self, r: requests.Response) -> None:
+        """Check if the response indicates a server error (stop process)."""
+        if r is not None and 500 <= r.status_code < 600:
+            response = self._safe_json(r)
+            if response and "message" in response:
+                message = response["message"]
+            else:
+                message = f"HTTP {r.status_code} error with no message"
+
+            error_info = {
+                "server_error_code": f"{r.status_code}",
+                "message": f"Server error: {message}",
+            }
+            self.summary["ERRORS"].append(error_info)
+            raise requests.exceptions.HTTPError(f"Server error: {message}")
 
     def _reset_summary(self) -> None:
         self.summary = {
