@@ -13,6 +13,7 @@ from tests.mock_dhis2_post import (
     MOCK_DHIS2_ERROR_409_RESPONSE_DE,
     MOCK_DHIS2_ERROR_409_RESPONSE_ORG_UNITS,
     MOCK_DHIS2_ERROR_409_RESPONSE_PERIOD,
+    MOCK_DHIS2_ERROR_409_RESPONSE_VALUE_FORMAT,
     MOCK_DHIS2_ERROR_503_RESPONSE,
     MOCK_DHIS2_OK_RESPONSE,
     MockDHIS2Response,
@@ -383,4 +384,49 @@ def test_push_data_points_aoc_error():
         assert pusher.summary["ERRORS"][1]["object"] == "INVALID_AOC_2"
 
 
-# def test_push_data_points_value_format_error(): # 5.000000000001
+def test_push_data_points_value_format_error():
+    """Test the error handling push of data points with value not numeric."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+
+    # NOTE: This fake input is just to pass validation and
+    #  match the information manufactured in the response
+    invalid_data_points = [
+        {
+            "dataElement": "VALID1",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "1",
+        },
+        {
+            "dataElement": "VALID2",
+            "period": "202501",
+            "orgUnit": "ORG002",
+            "categoryOptionCombo": "CAT002",
+            "attributeOptionCombo": "ATTR002",
+            "value": "0.0000e15",  # Non numeric format for DHIS2 API
+        },
+        {
+            "dataElement": "VALID3",
+            "period": "202501",
+            "orgUnit": "ORG003",
+            "categoryOptionCombo": "CAT003",
+            "attributeOptionCombo": "ATTR003",
+            "value": "1",
+        },
+    ]
+
+    # MOCK_DHIS2_ERROR_409_RESPONSE_VALUE_FORMAT was manually manufactured to simulate a Conflict from DHIS2.
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_VALUE_FORMAT, status_code=409),
+    ):
+        pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
+        assert pusher.summary["import_counts"]["imported"] == 2
+        assert pusher.summary["import_counts"]["updated"] == 0
+        assert pusher.summary["import_counts"]["ignored"] == 1
+        assert pusher.summary["import_counts"]["deleted"] == 0
+        assert len(pusher.summary["ERRORS"]) == 1
+        assert pusher.summary["ERRORS"][0]["object"] == "VALID2"
