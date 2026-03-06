@@ -207,7 +207,7 @@ class DHIS2Pusher:
         if not errors:
             self._log_message("No errors found in the summary.")
         else:
-            self._log_message(f"Logging {len(errors)} error(s) from export summary.", level="error")
+            self._log_message(f"Logging {len(errors)} error(s) from import summary.", level="error")
             for i_e, error in enumerate(errors, start=1):
                 self._log_message(f"Error response {i_e}: {error}", level="error")
 
