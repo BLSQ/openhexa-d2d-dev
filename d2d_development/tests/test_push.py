@@ -24,10 +24,9 @@ def test_push_no_data_to_push():
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
     cols = ["dx", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
     empty_df = pl.DataFrame({col: [] for col in cols})
-    # pusher.push_data(empty_df)
-    with patch("d2d_development.push.current_run.log_info") as mock_log_info:
+    with patch.object(DHIS2Pusher, "_log_message") as mock_log_message:
         pusher.push_data(empty_df)
-        mock_log_info.assert_any_call("Input DataFrame is empty. No data to push.")
+        mock_log_message.assert_any_call("Input DataFrame is empty. No data to push.")
     assert pusher.summary["import_counts"]["imported"] == 0
 
 

@@ -56,7 +56,7 @@ class DHIS2Pusher:
         self._validate_input_data(df_data)
 
         if df_data.height == 0:
-            current_run.log_info("Input DataFrame is empty. No data to push.")
+            self._log_message("Input DataFrame is empty. No data to push.")
             return
 
         self._reset_summary()
@@ -105,6 +105,40 @@ class DHIS2Pusher:
 
         return valid, to_delete, not_valid
 
+    def _log_message(
+        self, message: str, error_details: str = "", log_current_run: bool = True, level: str = "info"
+    ) -> None:
+        """Log a message to both the current run and the configured logger.
+
+        Parameters
+        ----------
+        message : str
+            The message to log.
+        error_details : str, optional
+            Additional details to include in error logs, by default "".
+        log_current_run : bool, optional
+            Whether to log the message to the current run, by default True.
+        level : str, optional
+            The logging level ('info', 'warning', 'error'), by default 'info'.
+        """
+        if level == "info":
+            self.logger.info(message)
+        elif level == "warning":
+            self.logger.warning(message)
+        elif level == "error":
+            self.logger.error(f"{message} Details: {error_details}")
+        else:
+            raise PusherError(f"Invalid logging level: {level}")
+
+        # Log to current_run only if it exists
+        if log_current_run and "current_run" in globals() and current_run is not None:
+            if level == "info":
+                current_run.log_info(message)
+            elif level == "warning":
+                current_run.log_warning(message)
+            elif level == "error":
+                current_run.log_error(message)
+
     def _set_summary_import_options(self):
         self.summary["import_options"] = {
             "importStrategy": self.import_strategy,
@@ -116,42 +150,37 @@ class DHIS2Pusher:
     def _push_valid(self, data_points_valid: list) -> None:
         """Push valid values to DHIS2."""
         if len(data_points_valid) == 0:
-            current_run.log_info("No data to push.")
+            self._log_message("No data to push.")
             return
 
-        msg = f"Pushing {len(data_points_valid)} data points."
-        current_run.log_info(msg)
-        self.logger.info(msg)
+        self._log_message(f"Pushing {len(data_points_valid)} data points.")
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_valid))
-        msg = f"Data points push summary:  {self.summary['import_counts']}"
-        current_run.log_info(msg)
-        self.logger.info(msg)
+        self._log_message(f"Data points push summary:  {self.summary['import_counts']}")
         self._log_summary_errors()
 
     def _push_to_delete(self, data_points_to_delete: pl.DataFrame) -> None:
         if data_points_to_delete.height == 0:
             return
 
-        current_run.log_info(f"Pushing {len(data_points_to_delete)} data points with NA values.")
-        self.logger.info(f"Pushing {len(data_points_to_delete)} data points with NA values.")
+        self._log_message(f"Pushing {len(data_points_to_delete)} data points with NA values.")
         self._log_ignored_or_na(data_points_to_delete, is_na=True)
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_to_delete))
-
-        current_run.log_info(f"Data points delete summary: {self.summary['import_counts']}")
-        self.logger.info(f"Data points delete summary: {self.summary['import_counts']}")
+        self._log_message(f"Data points delete summary: {self.summary['import_counts']}")
         self._log_summary_errors()
 
     def _log_ignored_or_na(self, data_point_list: list, is_na: bool = False):
         """Logs ignored or NA data points."""
         if len(data_point_list) > 0:
-            current_run.log_info(
+            self._log_message(
                 f"{len(data_point_list)} data points will be  {'set to NA' if is_na else 'ignored'}. "
-                "Please check the last execution report for details."
+                "Please check the last execution report for details.",
+                level="warning",
             )
-            self.logger.warning(f"{len(data_point_list)} data points to be {'set to NA' if is_na else 'ignored'}: ")
             for i, ignored in enumerate(data_point_list, start=1):
                 row_str = ", ".join(f"{k}={v}" for k, v in ignored.items())
-                self.logger.warning(f"{i}. Data point {'NA' if is_na else 'ignored'}: {row_str}")
+                self._log_message(
+                    f"{i}. Data point {'NA' if is_na else 'ignored'}: {row_str}", log_current_run=False, level="warning"
+                )
 
     def _serialize_data_points(self, data_points: pl.DataFrame) -> list[dict]:
         """Convert a Polars DataFrame of data points into a list of dictionaries for DHIS2 API.
@@ -176,11 +205,11 @@ class DHIS2Pusher:
         """Logs all the errors in the summary dictionary using the configured logging."""
         errors = self.summary.get("ERRORS", [])
         if not errors:
-            self.logger.info("No errors found in the summary.")
+            self._log_message("No errors found in the summary.")
         else:
-            self.logger.error(f"Logging {len(errors)} error(s) from export summary.")
+            self._log_message(f"Logging {len(errors)} error(s) from export summary.", level="error")
             for i_e, error in enumerate(errors, start=1):
-                self.logger.error(f"Error response {i_e}: {error}")
+                self._log_message(f"Error response {i_e}: {error}", level="error")
 
     def _post(self, chunk: list[dict]) -> requests.Response:
         """Send a POST request to DHIS2 for a chunk of data values.
@@ -240,14 +269,14 @@ class DHIS2Pusher:
             # Log every logging_interval points
             if processed_points - last_logged_at >= self.logging_interval:
                 progress_pct = (processed_points / total_data_points) * 100
-                current_run.log_info(
+                self._log_message(
                     f"{processed_points} / {total_data_points} data points ({progress_pct:.1f}%) "
                     f" summary: {self.summary['import_counts']}"
                 )
                 last_logged_at = processed_points
 
         # Final summary
-        current_run.log_info(
+        self._log_message(
             f"{processed_points} / {total_data_points} data points processed."
             f" Final summary: {self.summary['import_counts']}"
         )
