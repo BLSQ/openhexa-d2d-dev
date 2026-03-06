@@ -10,6 +10,10 @@ from openhexa.toolbox.dhis2 import DHIS2
 from .data_models import DataPointModel
 
 
+class PusherError(Exception):
+    """Custom exception for all DHIS2Pusher errors."""
+
+
 class DHIS2Pusher:
     """Main class to handle pushing data to DHIS2."""
 
@@ -26,7 +30,7 @@ class DHIS2Pusher:
         self.dhis2_client = dhis2_client
 
         if import_strategy not in {"CREATE", "UPDATE", "CREATE_AND_UPDATE"}:
-            raise ValueError("Invalid import strategy (use 'CREATE', 'UPDATE' or 'CREATE_AND_UPDATE')")
+            raise PusherError("Invalid import strategy (use 'CREATE', 'UPDATE' or 'CREATE_AND_UPDATE')")
 
         if mandatory_fields is None:
             self.mandatory_fields = ["dx", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
@@ -49,8 +53,7 @@ class DHIS2Pusher:
         if isinstance(df_data, pd.DataFrame):
             df_data = pl.from_pandas(df_data)
 
-        if not isinstance(df_data, pl.DataFrame):
-            raise ValueError("Input data must be a pandas or polars DataFrame.")
+        self._validate_input_data(df_data)
 
         if df_data.height == 0:
             current_run.log_info("Input DataFrame is empty. No data to push.")
@@ -63,6 +66,20 @@ class DHIS2Pusher:
         self._push_valid(valid)
         self._push_to_delete(to_delete)
         self._log_ignored_or_na(to_ignore)
+
+    def _validate_input_data(self, df_data: pl.DataFrame) -> None:
+        """Validate that the input DataFrame contains all mandatory fields.
+
+        Raises
+        ------
+            PusherError: If any mandatory field is missing from the DataFrame.
+        """
+        if not isinstance(df_data, pl.DataFrame):
+            raise PusherError("Input data must be a pandas or polars DataFrame.")
+
+        missing_fields = [field for field in self.mandatory_fields if field not in df_data.columns]
+        if missing_fields:
+            raise PusherError(f"Input data is missing mandatory columns: {', '.join(missing_fields)}")
 
     def _classify_data_points(self, data_points: pl.DataFrame) -> tuple[list, list, list]:
         """Classify data points into valid, to delete, and to ignore based on mandatory fields.
@@ -249,7 +266,7 @@ class DHIS2Pusher:
                 "message": f"Server error: {message}",
             }
             self.summary["ERRORS"].append(error_info)
-            raise requests.exceptions.HTTPError(f"Server error: {message}")
+            raise PusherError(f"Server error: {message}") from None
 
     def _reset_summary(self) -> None:
         self.summary = {

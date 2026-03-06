@@ -2,10 +2,9 @@ from unittest.mock import patch
 
 import polars as pl
 import pytest
-import requests
 
 from d2d_development.extract import DHIS2Extractor
-from d2d_development.push import DHIS2Pusher
+from d2d_development.push import DHIS2Pusher, PusherError
 from tests.mock_dhis2_get import MockDHIS2Client
 from tests.mock_dhis2_post import (
     MOCK_DHIS2_ERROR_409_RESPONSE_AOC,
@@ -23,21 +22,32 @@ from tests.mock_dhis2_post import (
 def test_push_no_data_to_push():
     """Test the push of data points to DHIS2."""
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    cols = ["dx", "period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
+    empty_df = pl.DataFrame({col: [] for col in cols})
+    # pusher.push_data(empty_df)
+    with patch("d2d_development.push.current_run.log_info") as mock_log_info:
+        pusher.push_data(empty_df)
+        mock_log_info.assert_any_call("Input DataFrame is empty. No data to push.")
+    assert pusher.summary["import_counts"]["imported"] == 0
 
-    with patch.object(pusher.dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
-        pusher.push_data(df_data=pl.DataFrame([]))
-        print(pusher.summary)
-        assert pusher.summary["import_counts"]["imported"] == 0
+
+def test_push_missing_mandatory_columns():
+    """Test the push of data points to DHIS2."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    cols = ["period", "orgUnit", "categoryOptionCombo", "attributeOptionCombo", "value"]
+    empty_df = pl.DataFrame({col: [] for col in cols})
+    with pytest.raises(PusherError, match=r"Input data is missing mandatory columns: dx"):
+        pusher.push_data(df_data=empty_df)
 
 
 def test_push_wrong_input_type():
     """Test the push of data points to DHIS2."""
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
-    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+    with pytest.raises(PusherError, match=r"Input data must be a pandas or polars DataFrame."):
         pusher.push_data(df_data=[])
-    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+    with pytest.raises(PusherError, match=r"Input data must be a pandas or polars DataFrame."):
         pusher.push_data(df_data="not a dataframe")
-    with pytest.raises(ValueError, match=r"Input data must be a pandas or polars DataFrame."):
+    with pytest.raises(PusherError, match=r"Input data must be a pandas or polars DataFrame."):
         pusher.push_data(df_data={})
 
 
@@ -131,7 +141,7 @@ def test_push_data_points_connection_error():
         "post",
         return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_503_RESPONSE, status_code=503),
     ):
-        with pytest.raises(requests.exceptions.HTTPError):
+        with pytest.raises(PusherError, match=r"Server error: Service temporarily unavailable"):
             pusher._push_data_points([{"dummy_datapoint": "1"}])
         # After the exception, check the summary
         assert len(pusher.summary["ERRORS"]) == 1
