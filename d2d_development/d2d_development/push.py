@@ -65,6 +65,7 @@ class DHIS2Pusher:
 
         self._push_valid(valid)
         self._push_to_delete(to_delete)
+        self._log_summary_errors()
         self._log_ignored_or_na(to_ignore)
 
     def _validate_input_data(self, df_data: pl.DataFrame) -> None:
@@ -81,7 +82,7 @@ class DHIS2Pusher:
         if missing_fields:
             raise PusherError(f"Input data is missing mandatory columns: {', '.join(missing_fields)}")
 
-    def _classify_data_points(self, data_points: pl.DataFrame) -> tuple[list, list, list]:
+    def _classify_data_points(self, data_points: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         """Classify data points into valid, to delete, and to ignore based on mandatory fields.
 
         Returns
@@ -147,7 +148,7 @@ class DHIS2Pusher:
             "skipAudit": True,  # hardcoded for now, could be made configurable if needed
         }
 
-    def _push_valid(self, data_points_valid: list) -> None:
+    def _push_valid(self, data_points_valid: pl.DataFrame) -> None:
         """Push valid values to DHIS2."""
         if len(data_points_valid) == 0:
             self._log_message("No data to push.")
@@ -156,7 +157,6 @@ class DHIS2Pusher:
         self._log_message(f"Pushing {len(data_points_valid)} data points.")
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_valid))
         self._log_message(f"Data points push summary:  {self.summary['import_counts']}")
-        self._log_summary_errors()
 
     def _push_to_delete(self, data_points_to_delete: pl.DataFrame) -> None:
         if data_points_to_delete.height == 0:
@@ -166,17 +166,17 @@ class DHIS2Pusher:
         self._log_ignored_or_na(data_points_to_delete, is_na=True)
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_to_delete))
         self._log_message(f"Data points delete summary: {self.summary['import_counts']}")
-        self._log_summary_errors()
 
-    def _log_ignored_or_na(self, data_point_list: list, is_na: bool = False):
+    def _log_ignored_or_na(self, data_points: pl.DataFrame, is_na: bool = False):
         """Logs ignored or NA data points."""
-        if len(data_point_list) > 0:
+        data_points_list = data_points.to_dicts()
+        if len(data_points_list) > 0:
             self._log_message(
-                f"{len(data_point_list)} data points will be  {'set to NA' if is_na else 'ignored'}. "
+                f"{len(data_points_list)} data points will be  {'set to NA' if is_na else 'ignored'}. "
                 "Please check the last execution report for details.",
                 level="warning",
             )
-            for i, ignored in enumerate(data_point_list, start=1):
+            for i, ignored in enumerate(data_points_list, start=1):
                 row_str = ", ".join(f"{k}={v}" for k, v in ignored.items())
                 self._log_message(
                     f"{i}. Data point {'NA' if is_na else 'ignored'}: {row_str}", log_current_run=False, level="warning"
