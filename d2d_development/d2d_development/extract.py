@@ -504,25 +504,6 @@ class DHIS2Extractor:
                 "domain_type": [domain_type] * n,
                 "value": dhis_data["value"] if "value" in dhis_data.columns else None,
             }
-            if data_type == DataType.DATA_ELEMENT:
-                data["dx"] = dhis_data["dataElement"] if "dataElement" in dhis_data.columns else None
-                data["category_option_combo"] = (
-                    dhis_data["categoryOptionCombo"] if "categoryOptionCombo" in dhis_data.columns else None
-                )
-                data["attribute_option_combo"] = (
-                    dhis_data["attributeOptionCombo"] if "attributeOptionCombo" in dhis_data.columns else None
-                )
-            elif data_type == DataType.REPORTING_RATE:
-                if "dx" in dhis_data.columns:
-                    split = dhis_data["dx"].str.split_exact(".", 1)
-                    data["dx"] = split.struct.field("field_0")
-                    data["rate_metric"] = split.struct.field("field_1")
-            elif data_type == DataType.INDICATOR:
-                data["dx"] = dhis_data["dx"] if "dx" in dhis_data.columns else None
-                if map_cocs and "categoryOptionCombo" in dhis_data.columns:
-                    data["category_option_combo"] = dhis_data["categoryOptionCombo"]
-            return pl.DataFrame(data)
-
         except AttributeError as e:
             msg = (
                 f"Failed to map DHIS2 data to the expected format. "
@@ -531,10 +512,25 @@ class DHIS2Extractor:
             )
             self._log_message(msg, log_current_run=False, error_details=f"AttributeError: {e}", level="error")
             raise ExtractorError(msg) from e
-        except Exception as e:
-            msg = "Unexpected error while mapping DHIS2 data"
-            self._log_message(msg, log_current_run=False, error_details=f"{type(e).__name__}: {e}", level="error")
-            raise ExtractorError(msg) from e
+
+        if data_type == DataType.DATA_ELEMENT:
+            data["dx"] = dhis_data["dataElement"] if "dataElement" in dhis_data.columns else None
+            data["category_option_combo"] = (
+                dhis_data["categoryOptionCombo"] if "categoryOptionCombo" in dhis_data.columns else None
+            )
+            data["attribute_option_combo"] = (
+                dhis_data["attributeOptionCombo"] if "attributeOptionCombo" in dhis_data.columns else None
+            )
+        elif data_type == DataType.REPORTING_RATE:
+            if "dx" in dhis_data.columns:
+                split = dhis_data["dx"].str.split_exact(".", 1)
+                data["dx"] = split.struct.field("field_0")
+                data["rate_metric"] = split.struct.field("field_1")
+        elif data_type == DataType.INDICATOR:
+            data["dx"] = dhis_data["dx"] if "dx" in dhis_data.columns else None
+            if map_cocs and "categoryOptionCombo" in dhis_data.columns:
+                data["category_option_combo"] = dhis_data["categoryOptionCombo"]
+        return pl.DataFrame(data)
 
     def _log_message(self, message: str, level: str = "info", log_current_run: bool = True, error_details: str = ""):
         """Log a message using the configured logging function."""
