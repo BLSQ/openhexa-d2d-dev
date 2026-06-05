@@ -83,7 +83,6 @@ def save_to_parquet(data: pl.DataFrame | pd.DataFrame, filename: Path) -> None:
 
         # Atomically replace the old file with the new one
         temp_filename.replace(filename)
-        temp_filename = None  # Mark as successfully moved
     except Exception as e:
         # Clean up the temp file if it exists
         if temp_filename is not None and temp_filename.exists():
