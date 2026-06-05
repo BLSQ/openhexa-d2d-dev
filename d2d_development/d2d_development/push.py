@@ -258,9 +258,6 @@ class DHIS2Pusher:
                 if response:
                     self._update_import_counts(response)
 
-                # Capture conflicts/errorReports if present
-                self._extract_conflicts(response, chunk)
-
             except requests.exceptions.RequestException as e:
                 self._raise_server_errors(r)  # Stop the process if there's a server error
                 response = self._safe_json(r)
@@ -271,6 +268,8 @@ class DHIS2Pusher:
                     self.summary["import_errors"].extend(
                         [{"chunk": chunk_id, "period": chunk[0].get("period", "-"), "exception": str(e)}]
                     )
+            finally:
+                # Capture conflicts/errorReports if present
                 self._extract_conflicts(response, chunk)
 
             processed_points += len(chunk)

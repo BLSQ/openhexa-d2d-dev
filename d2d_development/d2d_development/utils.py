@@ -65,15 +65,16 @@ def save_to_parquet(data: pl.DataFrame | pd.DataFrame, filename: Path) -> None:
         Exception: If saving fails.
     """
     temp_filename = None
+
+    # Validate input type
+    if not isinstance(data, (pl.DataFrame, pd.DataFrame)):
+        raise ExtractorError("The 'data' parameter must be a Pandas or Polars DataFrame.")
+
+    # Write to a temporary file in the same directory
+    with tempfile.NamedTemporaryFile(suffix=".parquet", dir=filename.parent, delete=False) as tmp_file:
+        temp_filename = Path(tmp_file.name)
+
     try:
-        # Validate input type
-        if not isinstance(data, (pl.DataFrame, pd.DataFrame)):
-            raise ValueError("The 'data' parameter must be a Pandas or Polars DataFrame.")
-
-        # Write to a temporary file in the same directory
-        with tempfile.NamedTemporaryFile(suffix=".parquet", dir=filename.parent, delete=False) as tmp_file:
-            temp_filename = Path(tmp_file.name)
-
         # Use appropriate write method based on DataFrame type
         if isinstance(data, pl.DataFrame):
             data.write_parquet(temp_filename)
@@ -82,8 +83,6 @@ def save_to_parquet(data: pl.DataFrame | pd.DataFrame, filename: Path) -> None:
 
         # Atomically replace the old file with the new one
         temp_filename.replace(filename)
-        temp_filename = None  # Mark as successfully moved
-
     except Exception as e:
         # Clean up the temp file if it exists
         if temp_filename is not None and temp_filename.exists():
