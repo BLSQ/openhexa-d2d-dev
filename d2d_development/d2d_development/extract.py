@@ -104,6 +104,9 @@ class DataElementsExtractor:
             self.extractor._log_message(msg, log_current_run=False, error_details=str(e), level="error")
             raise ExtractorError(msg) from e
 
+        if not response:
+            return None
+
         # Transform to pandas first to handle automatic polars schema inference
         return self.extractor._map_to_dhis2_format(
             pl.from_pandas(pd.DataFrame(response).astype({"value": str})), data_type=DataType.DATA_ELEMENT
@@ -209,6 +212,9 @@ class IndicatorsExtractor:
             self.extractor._log_message(msg, log_current_run=False, error_details=str(e), level="error")
             raise ExtractorError(msg) from e
 
+        if not response:
+            return None
+
         # Transform to pandas first to handle automatic polars schema inference
         raw_data_formatted = pl.from_pandas(pd.DataFrame(response).astype({"value": str})).rename(
             {"pe": "period", "ou": "orgUnit"}
@@ -312,6 +318,9 @@ class ReportingRatesExtractor:
             msg = "Error retrieving reporting rates data"
             self.extractor._log_message(msg, log_current_run=False, error_details=str(e), level="error")
             raise ExtractorError(msg) from e
+
+        if not response:
+            return None
 
         # Transform to pandas first to handle automatic polars schema inference
         raw_data_formatted = pl.from_pandas(pd.DataFrame(response).astype({"value": str})).rename(

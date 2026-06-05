@@ -312,3 +312,48 @@ def test_extract_get_data_elements_with_indicator_extractor():
     assert result["data_type"].unique().to_list() == ["INDICATOR"]
     assert result["dx"].to_list() == ["DATAELEMENT1", "DATAELEMENT2", "DATAELEMENT3"]
     assert result["category_option_combo"].to_list() == ["COC001", "COC002", "COC003"]
+
+
+def test_download_period_empty_response_returns_none(tmp_path):  # noqa: ANN001
+    """Test that download_period returns None when the API returns an empty response."""
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+
+    with patch.object(extractor.dhis2_client.data_value_sets, "get", return_value=[]):
+        result = extractor.data_elements.download_period(
+            data_elements=[],
+            org_units=[],
+            period="202501",
+            output_dir=tmp_path,
+        )
+
+    assert result is None
+
+
+def test_download_period_indicators_empty_response_returns_none(tmp_path):  # noqa: ANN001
+    """Test that download_period returns None when the API returns an empty response."""
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+
+    with patch.object(extractor.dhis2_client.analytics, "get", return_value=[]):
+        result = extractor.indicators.download_period(
+            indicators=[],
+            org_units=[],
+            period="202501",
+            output_dir=tmp_path,
+        )
+
+    assert result is None
+
+
+def test_download_period_reporting_rates_empty_response_returns_none(tmp_path):  # noqa: ANN001
+    """Test that download_period returns None when the API returns an empty response."""
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+
+    with patch.object(extractor.dhis2_client.analytics, "get", return_value=[]):
+        result = extractor.reporting_rates.download_period(
+            reporting_rates=[],
+            org_units=[],
+            period="202501",
+            output_dir=tmp_path,
+        )
+
+    assert result is None
