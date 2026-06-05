@@ -68,7 +68,7 @@ def save_to_parquet(data: pl.DataFrame | pd.DataFrame, filename: Path) -> None:
 
     # Validate input type
     if not isinstance(data, (pl.DataFrame, pd.DataFrame)):
-        raise ValueError("The 'data' parameter must be a Pandas or Polars DataFrame.")
+        raise ExtractorError("The 'data' parameter must be a Pandas or Polars DataFrame.")
 
     # Write to a temporary file in the same directory
     with tempfile.NamedTemporaryFile(suffix=".parquet", dir=filename.parent, delete=False) as tmp_file:
