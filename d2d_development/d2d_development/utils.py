@@ -39,7 +39,7 @@ def log_message(
     elif level == "warning":
         logger.warning(message)
     elif level == "error":
-        logger.error(f"{message}")
+        logger.error(f"{message}. {error_details}")
     elif level == "debug":
         logger.debug(message)
     else:

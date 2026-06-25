@@ -209,7 +209,6 @@ class DatasetCompletionSync:
             response.raise_for_status()
             self._handle_push_response(ds=dataset_id, pe=period, ou=org_unit, response=response)
         except requests.RequestException:
-            # Catch DHIS2DatasetCompletionError errors
             self._handle_push_error_response(ds=dataset_id, pe=period, ou=org_unit, response=response)
 
     def _build_completion_payload(
@@ -317,6 +316,10 @@ class DatasetCompletionSync:
         saving_interval: Interval for saving progress (defaults to 2000).
         ds_processed_path: Path to save processed org units (if None, no file saving nor comparison).
         mark_uncompleted_as_processed: If True, org units with no completion status will be marked as processed.
+
+        Note: Only org units pushed with completed=True are written to the processed file. Org units pushed
+        with completed=False are intentionally excluded so they are retried on the next run, in case their
+        completion status has changed.
         """
         self._reset_summary()
 
@@ -338,54 +341,22 @@ class DatasetCompletionSync:
 
         try:
             self.processed = []
+            total_ou = len(org_units_to_process)
             for idx, ou in enumerate(org_units_to_process, start=1):
-                completion_status = self._get_source_completion_status_for(
-                    dataset_id=source_dataset_id,
+                self._process_org_unit(
+                    ou=ou,
+                    source_dataset_id=source_dataset_id,
+                    target_dataset_id=target_dataset_id,
                     period=period,
-                    org_unit=ou,
+                    mark_uncompleted_as_processed=mark_uncompleted_as_processed,
                 )
-
-                if not completion_status:
-                    self._handle_empty_completion_status(
-                        ds=source_dataset_id,
-                        pe=period,
-                        ou=ou,
-                        uncompleted_as_processed=mark_uncompleted_as_processed,
-                    )
-                    continue
-
-                if "date" not in completion_status or "completed" not in completion_status:
-                    self._log_and_append_error(
-                        error_type="fetch_errors",
-                        ds=source_dataset_id,
-                        pe=period,
-                        ou=ou,
-                        error_msg="Missing keys 'date' or 'completed' from completion response",
-                    )
-                    continue
-
-                try:
-                    self._push_completion_status_to_target(
-                        dataset_id=target_dataset_id,
-                        period=period,
-                        org_unit=ou,
-                        date=completion_status.get("date"),
-                        completed=completion_status.get("completed"),
-                    )
-                    self.processed.append(ou)
-                except DHIS2DatasetCompletionError:
-                    # Expected errors are logged and handled
-                    pass
-                except Exception as e:
-                    # Unexpected errors are raised
-                    raise DHIS2DatasetCompletionError(f"Unexpected error pushing completion status: {e!s}") from e
-
-                if idx % saving_interval == 0:
-                    self._log_message(f"{idx} / {len(org_units_to_process)} OUs processed")
-                    self._update_processed_ds_sync_file(
-                        period=period,
-                        processed_path=ds_processed_path,
-                    )
+                self._save_progress_if_needed(
+                    idx=idx,
+                    total=total_ou,
+                    saving_interval=saving_interval,
+                    period=period,
+                    processed_path=ds_processed_path,
+                )
         except Exception as e:
             error_msg = (
                 f"Dataset completion sync failed for dataset {target_dataset_id}, pe: {period} ou: {ou}. Error: {e}"
@@ -399,6 +370,67 @@ class DatasetCompletionSync:
                 processed_path=ds_processed_path,
             )
             self._log_summary(org_units=org_units_to_process, period=period)
+
+    def _process_org_unit(
+        self,
+        ou: str,
+        source_dataset_id: str,
+        target_dataset_id: str,
+        period: str,
+        mark_uncompleted_as_processed: bool,
+    ) -> None:
+        completion_status = self._get_source_completion_status_for(
+            dataset_id=source_dataset_id,
+            period=period,
+            org_unit=ou,
+        )
+
+        if not completion_status:
+            self._handle_empty_completion_status(
+                ds=source_dataset_id,
+                pe=period,
+                ou=ou,
+                uncompleted_as_processed=mark_uncompleted_as_processed,
+            )
+            return
+
+        if "date" not in completion_status or "completed" not in completion_status:
+            self._log_and_append_error(
+                error_type="fetch_errors",
+                ds=source_dataset_id,
+                pe=period,
+                ou=ou,
+                error_msg="Missing keys 'date' or 'completed' from completion response",
+            )
+            return
+
+        try:
+            self._push_completion_status_to_target(
+                dataset_id=target_dataset_id,
+                period=period,
+                org_unit=ou,
+                date=completion_status.get("date"),
+                completed=completion_status.get("completed"),
+            )
+            if completion_status.get("completed") is not None and completion_status.get("completed"):
+                self.processed.append(ou)
+        except DHIS2DatasetCompletionError:
+            pass
+        except Exception as e:
+            raise DHIS2DatasetCompletionError(f"Unexpected error pushing completion status: {e!s}") from e
+
+    def _save_progress_if_needed(
+        self,
+        idx: int,
+        total: int,
+        saving_interval: int,
+        period: str,
+        processed_path: Path | None,
+    ) -> None:
+        """Save progress at specified intervals."""
+        if idx % saving_interval == 0:
+            self._log_message(f"{idx} / {total} OUs processed")
+            self._update_processed_ds_sync_file(period=period, processed_path=processed_path)
 
     def _get_unprocessed_org_units(self, org_units: list, processed_path: Path | None, period: str) -> list:
         if processed_path is None:
@@ -418,11 +450,6 @@ class DatasetCompletionSync:
 
             processed_set = set(processed_df["ORG_UNIT"].dropna().unique())
             remaining = [ou for ou in org_units if ou not in processed_set]
-
-            self._log_message(
-                f"Loaded {len(processed_set)} processed org units, {len(remaining)} to process for period {period}."
-            )
-            return list(set(remaining))
         except Exception as e:
             self._log_message(
                 f"Error loading processed file: {ds_processed_fname}. Returning all org units to process.",
@@ -431,6 +458,11 @@ class DatasetCompletionSync:
             )
             return list(set(org_units))
 
+        self._log_message(
+            f"Loaded {len(processed_set)} processed org units, {len(remaining)} to process for period {period}."
+        )
+        return list(set(remaining))
+
     def _update_processed_ds_sync_file(
         self,
         period: str,
@@ -438,7 +470,7 @@ class DatasetCompletionSync:
     ) -> None:
         """Save the processed org units to a parquet file."""
         if processed_path is None:
-            self._log_message("No processed path provided, skipping save.", level="warning")
+            self._log_message("No processed path provided, skipping save.", level="info")
             return
 
         try:
@@ -502,7 +534,7 @@ class DatasetCompletionSync:
             self._update_import_summary(response=json_data)
             return
 
-        raise requests.RequestException
+        raise requests.RequestException("Unexpected DHIS2 status")
 
     def _handle_push_error_response(self, ds: str, pe: str, ou: str, response: requests.Response) -> None:
         """Log the response from the DHIS2 API after pushing completion status.
@@ -550,6 +582,15 @@ class DatasetCompletionSync:
             )
             self._update_import_summary(response=json_data)
             raise DHIS2DatasetCompletionError(f"Failed to push completion status: {json_data!s}")
+
+        self._log_and_append_error(
+            error_type="push_errors",
+            ds=ds,
+            pe=pe,
+            ou=ou,
+            error_msg=f"Unexpected DHIS2 status ({status}), treating as error",
+        )
+        raise DHIS2DatasetCompletionError(f"Unexpected DHIS2 status ({status}): {json_data!s}")
 
     def _try_parse_json(self, r: requests.Response) -> dict | None:
         if r is None:

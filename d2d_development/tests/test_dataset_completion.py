@@ -465,3 +465,52 @@ def test_sync_completion_processed_ous(mock_response: dict):
     ]
     assert actual_calls == expected_calls
     assert sync.processed == [f"ou{i}" for i in range(1, 11)]
+
+
+@pytest.mark.parametrize(
+    "mock_response", [MOCK_DHIS2_COMPLETION_200_IMP_RESPONSE_V2_37, MOCK_DHIS2_COMPLETION_200_IMP_RESPONSE_V2_40]
+)
+def test_sync_completion_false_status_not_added_to_processed(mock_response: dict):
+    """Test that org units with completed=False are not added to the processed list.
+
+    Even if the push to the target succeeds, OUs with completed=False must remain
+    untracked so they are retried on the next run in case their status changes.
+    """
+    dhis2_source = MagicMock()
+    dhis2_target = MagicMock()
+
+    mock_get_response = MagicMock()
+    mock_get_response.json.return_value = {
+        "completeDataSetRegistrations": [
+            {
+                "period": "202601",
+                "dataSet": "DS1",
+                "organisationUnit": "ou1",
+                "attributeOptionCombo": "HllvX50cXC0",
+                "date": "2026-01-31",
+                "storedBy": "OpenHexa",
+                "completed": False,
+            },
+            {
+                "period": "202601",
+                "dataSet": "DS1",
+                "organisationUnit": "ou2",
+                "attributeOptionCombo": "HllvX50cXC0",
+                "date": "2026-01-31",
+                "storedBy": "OpenHexa",
+                "completed": True,
+            },
+        ]
+    }
+    dhis2_source.api.session.get.return_value = mock_get_response
+
+    mock_post_response = MagicMock()
+    mock_post_response.json.return_value = mock_response
+    dhis2_target.api.session.post.return_value = mock_post_response
+
+    sync = DatasetCompletionSync(dhis2_source, dhis2_target)
+    sync.log_function = MagicMock()
+    sync.sync(source_dataset_id="DS1", target_dataset_id="DS2", org_units=["ou1", "ou2"], period="202601")
+
+    assert "ou1" not in sync.processed  # completed=False → must not be tracked
+    assert "ou2" in sync.processed  # completed=True → must be tracked
