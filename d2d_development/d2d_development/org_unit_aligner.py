@@ -1,4 +1,3 @@
-import json
 import logging
 import math
 
@@ -7,8 +6,7 @@ import polars as pl
 import requests
 from openhexa.toolbox.dhis2 import DHIS2
 from packaging import version
-from requests import Response
-from requests.structures import CaseInsensitiveDict
+from pydantic import ValidationError
 
 from .data_models import OrgUnit
 from .exceptions import OrgUnitAlignError, OrgUnitError
@@ -73,7 +71,7 @@ class DHIS2PyramidAligner:
       - Creates OUs missing in the target
       - Updates OUs with changed attributes
       - Tracks actions and errors in a summary attribute for reporting
-    Supports validation, logging, and dry-run mode.
+    Supports validation and logging.
 
     Usage: Instantiate with a logger and call align_to().
     """
@@ -85,10 +83,8 @@ class DHIS2PyramidAligner:
 
     def _initialize_summary(self):
         self.summary = {
-            "CREATE": {"CREATED": [], "ERRORS": []},
-            "UPDATE": {"UPDATED": [], "ERRORS": []},
-            "INVALID": [],
-            "MALFORMED": [],
+            "CREATE": {"CREATED": [], "INVALID": [], "MALFORMED": [], "ERROR": []},
+            "UPDATE": {"UPDATED": [], "INVALID": [], "MALFORMED": [], "ERROR": []},
         }
 
     def align_to(
@@ -107,33 +103,48 @@ class DHIS2PyramidAligner:
         if source_pyramid.is_empty():
             self._log_message("Source pyramid is empty. Organisation units alignment skipped.", level="warning")
             return
-
+        self._log_message(f"Retrieving organisation units from target DHIS2: {target_dhis2.api.url}")
         self._initialize_summary()
 
-        self._log_message(f"Retrieving organisation units from target DHIS2: {target_dhis2.api.url}")
-        # Retrieve all organisation units from the target DHIS2
-        target_pyramid = target_dhis2.meta.organisation_units(
-            fields="id,name,shortName,openingDate,closedDate,parent,level,path,geometry"
-        )
-        target_pyramid = _records_to_polars(target_pyramid)
+        try:
+            # Retrieve all organisation units from the target DHIS2
+            target_pyramid = target_dhis2.meta.organisation_units(
+                fields="id,name,shortName,openingDate,closedDate,parent,level,path,geometry"
+            )
+            target_pyramid = _records_to_polars(target_pyramid)
+        except Exception as e:
+            msg = "Unexpected error occurred while retrieving organisation units from target DHIS2."
+            self._log_message(message=msg, level="error", error_details=str(e))
+            raise OrgUnitAlignError(f"{msg} {e}") from e
+
         self._log_message(f"Shape target pyramid: {target_pyramid.shape}")
 
         # Select new OU: all OU in source not in target (set difference)
         ou_new = list(set(source_pyramid["id"]) - set(target_pyramid["id"]))
         ou_to_create = source_pyramid.filter(pl.col("id").is_in(ou_new))
-        self._push_org_units_create(
-            ou_to_create=ou_to_create,
-            target_dhis2=target_dhis2,
-        )
+        try:
+            self._push_org_units_create(
+                ou_to_create=ou_to_create,
+                target_dhis2=target_dhis2,
+            )
+        except Exception as e:
+            msg = "Unexpected error occurred while creating new organisation units."
+            self._log_message(message=msg, level="error", error_details=str(e))
+            raise OrgUnitAlignError(f"{msg} {e}") from e
 
         # Select matching OU: all OU uid that match between DHIS2 source and target (set intersection)
         matching_ou_ids = list(set(source_pyramid["id"]).intersection(set(target_pyramid["id"])))
-        self._push_org_units_update(
-            org_unit_source=source_pyramid,
-            org_unit_target=target_pyramid,
-            ou_ids_to_check=matching_ou_ids,
-            target_dhis2=target_dhis2,
-        )
+        try:
+            self._push_org_units_update(
+                org_unit_source=source_pyramid,
+                org_unit_target=target_pyramid,
+                ou_ids_to_check=matching_ou_ids,
+                target_dhis2=target_dhis2,
+            )
+        except Exception as e:
+            msg = "Unexpected error occurred while updating organisation units."
+            self._log_message(message=msg, level="error", error_details=str(e))
+            raise OrgUnitAlignError(f"{msg} {e}") from e
 
     def _log_message(
         self,
@@ -173,55 +184,78 @@ class DHIS2PyramidAligner:
             self._log_message(
                 "DHIS2 version not compatible with geometry. Geometry will not be pushed.", level="warning"
             )
-        self._log_message(f"Creating {len(ou_to_create)} organisation units.")
 
+        self._log_message(f"Creating {len(ou_to_create)} organisation units.")
         for record in ou_to_create.to_dicts():
             try:
                 ou = OrgUnit.model_validate(record)
-            except OrgUnitError as e:
-                self._handle_malformed_ou(record, error_details=str(e))
+            except (OrgUnitError, ValidationError) as e:
+                self._log_error_ou(record, import_strategy="CREATE", error_type="MALFORMED", error_details=str(e))
                 continue
 
             if ou.is_valid():
-                self._handle_org_unit_push(ou=ou, target_dhis2=target_dhis2, action="CREATE")
+                self._handle_org_unit_push(ou=ou, target_dhis2=target_dhis2, import_strategy="CREATE")
             else:
-                self._handle_invalid_ou(ou)
+                self._log_error_ou(ou.to_json(), import_strategy="CREATE", error_type="INVALID")
 
-    def _handle_malformed_ou(self, record: dict, error_details: str) -> None:
-        self.summary["INVALID"]["MALFORMED_COUNT"] += 1
-        self.summary["INVALID"]["MALFORMED_DETAILS"].append(record)
-        msg = f"Invalid organisation unit data: {error_details}. Record: {record}"
-        self._log_message(msg, level="error", error_details=error_details, log_current_run=True)
-
-    def _handle_org_unit_push(self, ou: OrgUnit, target_dhis2: DHIS2, action: str) -> None:
+    def _handle_org_unit_push(self, ou: OrgUnit, target_dhis2: DHIS2, import_strategy: str) -> None:
         """Handle the creation of an organisation unit in the target DHIS2 instance."""
         try:
-            self._push_org_unit(
+            response = self._push_org_unit(
                 dhis2_client=target_dhis2,
                 org_unit=ou,
-                strategy=action,
+                import_strategy=import_strategy,
             )
         except Exception as e:
-            msg = f"An error occurred while pushing organisation unit {ou.id}: {e}."
-            self._log_message(msg, level="error", error_details=str(e), log_current_run=True)
+            self._log_error_ou(ou.to_json(), import_strategy=import_strategy, error_type="ERROR", error_details=str(e))
+            return
 
-    def _handle_response(self, response: dict, ou: OrgUnit, action: str) -> None:
-        response = self._build_formatted_response(response=response, strategy=action, ou_id=ou.id)
+        self._handle_response(response=response, ou=ou, import_strategy=import_strategy)
+
+    def _handle_response(self, response: dict, ou: OrgUnit, import_strategy: str) -> None:
+        """Handle the response from the DHIS2 API after attempting to create or update an organisation unit."""
+        if response is None:
+            self._log_error_ou(
+                ou.to_json(),
+                import_strategy=import_strategy,
+                error_type="ERROR",
+                error_details="No response received from DHIS2 API",
+            )
+            return
+
+        if not isinstance(response, dict):
+            self._log_error_ou(
+                ou.to_json(),
+                import_strategy=import_strategy,
+                error_type="ERROR",
+                error_details="Invalid response format",
+            )
+            return
+
         if response.get("status") not in ("SUCCESS", "OK"):
-            self.summary["CREATE"]["ERROR_COUNT"] += 1
-            self.summary["CREATE"]["ERROR_DETAILS"].append(response)
-            self._log_message(f"Error creating org unit: {response}", level="error")
-        else:
-            created_ou = {"ACTION": "CREATE", "OU": str(ou.to_json()), "RESPONSE": response}
-            self.summary["CREATE"]["CREATE_COUNT"] += 1
-            self.summary["CREATE"]["CREATE_DETAILS"].append(created_ou)
-            self._log_message(created_ou)
+            self._log_error_ou(
+                ou.to_json(),
+                import_strategy=import_strategy,
+                error_type="ERROR",
+                error_details=f"Failed to {import_strategy.lower()} organisation unit: {response}",
+            )
+            return
 
-    def _handle_invalid_ou(self, ou: OrgUnit) -> None:
-        invalid_ou = {"ACTION": "CREATE", "STATUS": "INVALID", "OU": str(ou.to_json())}
-        self.summary["INVALID"]["INVALID_COUNT"] += 1
-        self.summary["INVALID"]["INVALID_DETAILS"].append(invalid_ou)
-        self._log_message(invalid_ou, "warning")
+        action_str = "CREATED" if import_strategy == "CREATE" else "UPDATED"
+        self.summary[import_strategy][action_str].append(ou.to_json())
+        self._log_message(
+            f"Organisation unit {action_str.lower()}: {ou.to_json()}", level="info", log_current_run=False
+        )
+
+    def _log_error_ou(self, ou: dict, import_strategy: str, error_type: str, error_details: str | None) -> None:
+        self.summary[import_strategy][error_type].append(ou)
+        error_str = f"Error: {error_details}" if error_details else None
+        self._log_message(
+            f"{error_type} organisation unit: {ou}.",
+            level="error",
+            error_details=error_str,
+            log_current_run=False,
+        )
 
     def _push_org_units_update(
         self,
@@ -236,73 +270,68 @@ class DHIS2PyramidAligner:
             self._log_message("No organisation units to update.")
             return
 
+        self._log_message(f"Checking for updates in {len(ou_ids_to_check)} organisation units.")
+        # NOTE: Geometry is valid for versions > 2.32
+        if version.parse(target_dhis2.version) <= version.parse("2.32"):
+            org_unit_source = org_unit_source.with_columns(pl.lit(None).alias("geometry"))
+            org_unit_target = org_unit_target.with_columns(pl.lit(None).alias("geometry"))
+            self._log_message("DHIS2 version not compatible with geometry. Geometry will be ignored.", level="warning")
+
+        # Target org units come straight from the DHIS2 API: trusted shape, validate in bulk.
         try:
-            self._log_message(f"Checking for updates in {len(ou_ids_to_check)} organisation units.")
-            # NOTE: Geometry is valid for versions > 2.32
-            if version.parse(target_dhis2.version) <= version.parse("2.32"):
-                org_unit_source = org_unit_source.with_columns(pl.lit(None).alias("geometry"))
-                org_unit_target = org_unit_target.with_columns(pl.lit(None).alias("geometry"))
-                self._log_message(
-                    "DHIS2 version not compatible with geometry. Geometry will be ignored.", level="warning"
-                )
-
-            # build id dictionary (faster) to compare source vs target OU
-            index_dictionary = self._build_id_indexes(org_unit_source, org_unit_target, ou_ids_to_check)
-
-            # Materialize each DataFrame into OrgUnit instances once, instead of rebuilding a row
-            # (via .iloc) for every matching id inside the loop below.
-            source_ous = [OrgUnit.model_validate(record) for record in org_unit_source.to_dicts()]
-            target_ous = [OrgUnit.model_validate(record) for record in org_unit_target.to_dicts()]
-
-            total_ou = len(ou_ids_to_check)
-            for progress_count, (_, indices) in enumerate(index_dictionary.items(), start=1):
-                # Create the OU and check if there are differences
-                # NOTE: See OrgUnit.__eq__() to check the comparison logic
-                ou_source = source_ous[indices["source"]]
-                ou_target = target_ous[indices["target"]]
-
-                if ou_source != ou_target:
-                    response = self._push_org_unit(
-                        dhis2_client=target_dhis2,
-                        org_unit=ou_source,
-                        strategy="UPDATE",
-                        is_testing=False,
-                    )
-                    if response.get("status") not in ("SUCCESS", "OK"):
-                        self.summary["UPDATE"]["ERROR_COUNT"] += 1
-                        self.summary["UPDATE"]["ERROR_DETAILS"].append(response)
-                        self.logger.error(str(response))
-                    else:
-                        updated_ou = {
-                            "ACTION": "UPDATE",
-                            "OLD_OU": str(ou_target.to_json()),
-                            "NEW_OU": str(ou_source.to_json()),
-                            "RESPONSE": str(response),
-                        }
-                        self.summary["UPDATE"]["UPDATE_COUNT"] += 1
-                        self.summary["UPDATE"]["UPDATE_DETAILS"].append(updated_ou)
-                        self.logger.info(str(updated_ou))
-
-                if progress_count % logging_interval == 0 or progress_count == total_ou:
-                    self._log_message(f"Organisation units checked: {progress_count}/{total_ou} for update.")
-
+            target_by_id = {record["id"]: OrgUnit.model_validate(record) for record in org_unit_target.to_dicts()}
         except Exception as e:
-            msg = "Unexpected error occurred while updating organisation units."
-            self.logger.exception(msg)
-            raise OrgUnitAlignError(f"{msg} Check logs for details.") from e
+            self._log_message(
+                "Unexpected error occurred while preparing target organisation units for update.",
+                level="error",
+                error_details=str(e),
+            )
+            raise OrgUnitAlignError from e
+
+        # Source org units are external input: validate one record at a time so a single
+        # malformed row is logged and skipped instead of aborting every update.
+        source_by_id: dict[str, OrgUnit] = {}
+        for record in org_unit_source.to_dicts():
+            try:
+                source_by_id[record["id"]] = OrgUnit.model_validate(record)
+            except (OrgUnitError, ValidationError) as e:
+                self._log_error_ou(record, import_strategy="UPDATE", error_type="MALFORMED", error_details=str(e))
+
+        total_ou = len(ou_ids_to_check)
+        for progress_count, ou_id in enumerate(ou_ids_to_check, start=1):
+            ou_source = source_by_id.get(ou_id)
+            ou_target = target_by_id.get(ou_id)
+            if ou_source is not None and ou_target is not None:
+                if not ou_source.is_valid():
+                    self._log_error_ou(ou_source.to_json(), import_strategy="UPDATE", error_type="INVALID")
+                # NOTE: See OrgUnit.__eq__() to check the comparison logic
+                elif ou_source != ou_target:
+                    self._handle_org_unit_push(ou=ou_source, target_dhis2=target_dhis2, import_strategy="UPDATE")
+
+            if progress_count % logging_interval == 0 or progress_count == total_ou:
+                self._log_message(f"Organisation units checked: {progress_count}/{total_ou} for update.")
 
     def _push_org_unit(
         self,
         dhis2_client: DHIS2,
         org_unit: OrgUnit,
-        strategy: str = "CREATE",
+        import_strategy: str = "CREATE",
     ) -> dict:
-        """Pushes an organisation unit to the DHIS2 instance using the specified strategy."""
-        if strategy == "CREATE":
+        """Pushes an organisation unit to the DHIS2 instance using the specified strategy.
+
+        Args:
+            dhis2_client: The DHIS2 client instance to use for the API call.
+            org_unit: The organisation unit to push.
+            import_strategy: The strategy to use for the import ("CREATE" or "UPDATE").
+
+        Returns:
+            dict: The response from the DHIS2 API.
+        """
+        if import_strategy == "CREATE":
             endpoint = "organisationUnits"
             payload = org_unit.to_json()
 
-        if strategy == "UPDATE":
+        if import_strategy == "UPDATE":
             endpoint = "metadata"
             payload = {"organisationUnits": [org_unit.to_json()]}
 
@@ -310,53 +339,9 @@ class DHIS2PyramidAligner:
             r = dhis2_client.api.session.post(
                 f"{dhis2_client.api.url}/{endpoint}",
                 json=payload,
-                params={"importStrategy": f"{strategy}"},
+                params={"importStrategy": f"{import_strategy}"},
             )
             r.raise_for_status()
+            return r.json()
         except requests.RequestException as e:
-            msg = f"HTTP request failed while trying to {strategy} organisation unit {org_unit.id}."
-            raise OrgUnitAlignError(f"{msg} Check logs for details.") from e
-
-        self._handle_response(response=r, ou=org_unit, strategy=strategy)
-
-    def _build_formatted_response(self, response: requests.Response, strategy: str, ou_id: str) -> dict:
-        """Build a formatted response dictionary from a requests.Response object.
-
-        Args:
-            response: The HTTP response object from the requests library.
-            strategy: The strategy or action performed.
-            ou_id: The organisational unit ID related to the response.
-
-        Returns:
-            dict: A dictionary containing the action, status code, status, response, and organisational unit ID.
-        """
-        return {
-            "action": strategy,
-            "statusCode": response.status_code,
-            "status": response.json().get("status"),
-            "response": response.json().get("response"),
-            "ou_id": ou_id,
-        }
-
-    def _build_id_indexes(self, ou_source: pl.DataFrame, ou_target: pl.DataFrame, ou_matching_ids: list) -> dict:
-        """Build a dictionary mapping matching OU IDs to their index positions in source and target DataFrames.
-
-        Args:
-            ou_source: Source DataFrame containing organisation units with an 'id' column.
-            ou_target: Target DataFrame containing organisation units with an 'id' column.
-            ou_matching_ids: List of organisation unit IDs to match between source and target.
-
-        Returns:
-            dict: Dictionary where keys are matching IDs and values are dicts with 'source' and 'target' index
-            positions.
-        """
-        # Set "id" as the index for faster lookup
-        df1_lookup = {val: idx for idx, val in enumerate(ou_source["id"])}
-        df2_lookup = {val: idx for idx, val in enumerate(ou_target["id"])}
-
-        # Build the dictionary using prebuilt lookups
-        return {
-            match_id: {"source": df1_lookup[match_id], "target": df2_lookup[match_id]}
-            for match_id in ou_matching_ids
-            if match_id in df1_lookup and match_id in df2_lookup
-        }
+            raise OrgUnitAlignError from e

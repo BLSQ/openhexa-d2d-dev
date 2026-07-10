@@ -44,7 +44,7 @@ def _run_align_to(source_pyramid: pd.DataFrame | pl.DataFrame) -> dict:
     aligner = DHIS2PyramidAligner(logger=logging.getLogger("test_org_unit_aligner"))
 
     with patch.object(dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)):
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=source_pyramid, dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=source_pyramid)
 
     return aligner.summary
 
@@ -53,18 +53,20 @@ def test_align_to_accepts_pandas_dataframe():
     """Test that align_to() accepts a pandas DataFrame and produces the expected CREATE/UPDATE counts."""
     summary = _run_align_to(pd.DataFrame(_source_records()))
 
-    assert summary["CREATE"]["CREATE_COUNT"] == 1
-    assert summary["UPDATE"]["UPDATE_COUNT"] == 1
-    assert summary["INVALID"]["INVALID_COUNT"] == 0
+    assert len(summary["CREATE"]["CREATED"]) == 1
+    assert len(summary["UPDATE"]["UPDATED"]) == 1
+    assert len(summary["CREATE"]["INVALID"]) == 0
+    assert len(summary["UPDATE"]["INVALID"]) == 0
 
 
 def test_align_to_accepts_polars_dataframe():
     """Test that align_to() accepts a polars DataFrame and produces the expected CREATE/UPDATE counts."""
     summary = _run_align_to(pl.DataFrame(_source_records()))
 
-    assert summary["CREATE"]["CREATE_COUNT"] == 1
-    assert summary["UPDATE"]["UPDATE_COUNT"] == 1
-    assert summary["INVALID"]["INVALID_COUNT"] == 0
+    assert len(summary["CREATE"]["CREATED"]) == 1
+    assert len(summary["UPDATE"]["UPDATED"]) == 1
+    assert len(summary["CREATE"]["INVALID"]) == 0
+    assert len(summary["UPDATE"]["INVALID"]) == 0
 
 
 def test_align_to_pandas_and_polars_inputs_agree():
@@ -112,11 +114,11 @@ def test_align_to_handles_mixed_geometry_shapes_in_source_pyramid():
     with patch.object(
         dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)
     ) as mock_post:
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(records), dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(records))
 
-    assert aligner.summary["CREATE"]["CREATE_COUNT"] == len(records)
-    assert aligner.summary["CREATE"]["ERROR_COUNT"] == 0
-    assert aligner.summary["INVALID"]["INVALID_COUNT"] == 0
+    assert len(aligner.summary["CREATE"]["CREATED"]) == len(records)
+    assert len(aligner.summary["CREATE"]["ERROR"]) == 0
+    assert len(aligner.summary["CREATE"]["INVALID"]) == 0
 
     payloads = {call.kwargs["json"]["id"]: call.kwargs["json"] for call in mock_post.call_args_list}
     assert payloads["GEO_POINT"]["geometry"] == point
@@ -180,11 +182,11 @@ def test_align_to_handles_mixed_geometry_shapes_in_target_pyramid():
         patch.object(dhis2_client.meta, "organisation_units", return_value=target_records),
         patch.object(dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)),
     ):
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(source_records), dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(source_records))
 
-    assert aligner.summary["UPDATE"]["UPDATE_COUNT"] == 1
-    assert aligner.summary["UPDATE"]["ERROR_COUNT"] == 0
-    assert aligner.summary["INVALID"]["INVALID_COUNT"] == 0
+    assert len(aligner.summary["UPDATE"]["UPDATED"]) == 1
+    assert len(aligner.summary["UPDATE"]["ERROR"]) == 0
+    assert len(aligner.summary["UPDATE"]["INVALID"]) == 0
 
 
 def test_align_to_target_pyramid_geometry_not_dropped_when_first_record_lacks_it():
@@ -245,12 +247,12 @@ def test_align_to_target_pyramid_geometry_not_dropped_when_first_record_lacks_it
             dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)
         ) as mock_post,
     ):
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(source_records), dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame(source_records))
 
     # Source and target GEO_POINT geometries are identical, only the name changed, so the
     # comparison must be based on the target's real (non-dropped) geometry to detect the UPDATE.
-    assert aligner.summary["UPDATE"]["UPDATE_COUNT"] == 1
-    assert aligner.summary["UPDATE"]["ERROR_COUNT"] == 0
+    assert len(aligner.summary["UPDATE"]["UPDATED"]) == 1
+    assert len(aligner.summary["UPDATE"]["ERROR"]) == 0
     # UPDATE posts to the "metadata" endpoint, which wraps the org unit under "organisationUnits".
     pushed_org_unit = mock_post.call_args.kwargs["json"]["organisationUnits"][0]
     assert pushed_org_unit["geometry"] == point
@@ -298,10 +300,10 @@ def test_align_to_realistic_parquet_source_with_stringified_parent_and_geometry(
     with patch.object(
         dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)
     ) as mock_post:
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=source_pyramid, dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=source_pyramid)
 
-    assert aligner.summary["CREATE"]["CREATE_COUNT"] == 2
-    assert aligner.summary["INVALID"]["INVALID_COUNT"] == 0
+    assert len(aligner.summary["CREATE"]["CREATED"]) == 2
+    assert len(aligner.summary["CREATE"]["INVALID"]) == 0
 
     payloads = {call.kwargs["json"]["id"]: call.kwargs["json"] for call in mock_post.call_args_list}
     assert payloads["OU005"]["parent"] == {"id": "COUNTRY"}
@@ -351,9 +353,9 @@ def test_align_to_pandas_nan_closed_date_not_sent_as_literal_string():
     with patch.object(
         dhis2_client.api.session, "post", return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE)
     ) as mock_post:
-        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pd.DataFrame(records), dry_run=True)
+        aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pd.DataFrame(records))
 
-    assert aligner.summary["CREATE"]["CREATE_COUNT"] == 2
+    assert len(aligner.summary["CREATE"]["CREATED"]) == 2
     payloads = [call.kwargs["json"] for call in mock_post.call_args_list]
     ou004_payload = next(payload for payload in payloads if payload["id"] == "OU004")
     ou003_payload = next(payload for payload in payloads if payload["id"] == "OU003")
@@ -367,7 +369,7 @@ def test_align_to_empty_source_pyramid_skips_alignment():
     dhis2_client = MockDHIS2Client()
     aligner = DHIS2PyramidAligner(logger=logging.getLogger("test_org_unit_aligner"))
 
-    aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame({"id": []}), dry_run=True)
+    aligner.align_to(target_dhis2=dhis2_client, source_pyramid=pl.DataFrame({"id": []}))
 
-    assert aligner.summary["CREATE"]["CREATE_COUNT"] == 0
-    assert aligner.summary["UPDATE"]["UPDATE_COUNT"] == 0
+    assert len(aligner.summary["CREATE"]["CREATED"]) == 0
+    assert len(aligner.summary["UPDATE"]["UPDATED"]) == 0
