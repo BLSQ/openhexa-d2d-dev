@@ -1,11 +1,12 @@
+import ast
 import json
-from dataclasses import dataclass
+import math
 from enum import StrEnum
-from typing import NamedTuple
 
-import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from pydantic.alias_generators import to_camel
+
+from .exceptions import OrgUnitError
 
 
 class DataType(StrEnum):
@@ -53,148 +54,124 @@ class DataPointModel(BaseModel):
         return str(self.model_dump(by_alias=True))
 
 
-@dataclass
-class OrgUnitModel:
-    """Helper object definition to represent an organizational unit."""
+class OrgUnit(BaseModel):  # noqa: PLW1641 (no hashing)
+    """Data model representing a DHIS2 organisation unit.
 
-    id: str
-    name: str
-    shortName: str  # noqa: N815
-    openingDate: str  # noqa: N815
-    closedDate: str  # noqa: N815
-    parent: dict
+    Built directly from a mapping (e.g. a dict produced by `polars.DataFrame.to_dicts()`), using
+    either the DHIS2 camelCase field names or the snake_case attribute names below.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: str | None = None
+    name: str | None = None
+    short_name: str | None = None
+    opening_date: str | None = None
+    closed_date: str | None = None
+    parent: dict | None = None
     level: int
     path: str
-    geometry: str
+    geometry: dict | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _nan_to_none(cls, data: object) -> object:
+        """Normalize bare float NaN values (pandas' missing-value stand-in) to None.
 
-class OrgUnitRow(NamedTuple):
-    """Helper object definition to represent an organizational unit."""
+        A pandas DataFrame built from records containing None can silently turn those into
+        `float('nan')` (e.g. via `to_dict(orient="records")`), which would otherwise fail
+        validation on optional dict/str fields instead of being treated as absent.
 
-    id: str
-    name: str
-    shortName: str  # noqa: N815
-    openingDate: str  # noqa: N815
-    closedDate: str | None  # noqa: N815
-    parent: dict | None
-    level: int
-    path: str
-    geometry: str | dict | None
+        Args:
+            data: The raw input mapping passed to the model.
 
-
-class OrgUnitObj:  # noqa: PLW1641 (no hashing)
-    """Helper class definition to store/create the correct OrgUnit JSON format."""
-
-    def __init__(self, org_unit: OrgUnitRow | pd.Series | tuple):
-        """Create a new org unit instance.
-
-        Parameters
-        ----------
-        org_unit : OrgUnitRow | pd.Series
-            The organizational unit data.
-            Expects columns with names :
-                ['id', 'name', 'shortName', 'openingDate', 'closedDate', 'parent','level', 'path', 'geometry']
+        Returns:
+            object: The same mapping with any float NaN values replaced by None, or `data`
+            unchanged if it isn't a mapping.
         """
-        if isinstance(org_unit, pd.Series):
-            # Convert Series to OrgUnitRow
-            org_unit = OrgUnitRow(
-                id=org_unit["id"],
-                name=org_unit["name"],
-                shortName=org_unit["shortName"],
-                openingDate=org_unit["openingDate"],
-                closedDate=org_unit["closedDate"],
-                parent=org_unit["parent"],
-                level=org_unit["level"],
-                path=org_unit["path"],
-                geometry=org_unit["geometry"],
-            )
-        elif isinstance(org_unit, tuple) and hasattr(org_unit, "_fields"):
-            org_unit = OrgUnitRow(**org_unit._asdict())
-        elif not isinstance(org_unit, OrgUnitRow):
-            raise TypeError(f"Expected OrgUnitRow, pd.Series, or tuple, got {type(org_unit)}")
+        if isinstance(data, dict):
+            return {
+                key: (None if isinstance(value, float) and math.isnan(value) else value) for key, value in data.items()
+            }
+        return data
 
-        self.initialize_from(org_unit_tuple=org_unit)
+    @field_validator("parent", "geometry", mode="before")
+    @classmethod
+    def _parse_nested_dict(cls, value: object) -> dict | None:
+        """Parse a stringified dict into a dict, passing actual dicts and None through.
 
-    def initialize_from(self, org_unit_tuple: OrgUnitRow):
-        """Initialize the OrgUnitObj instance from an OrgUnitRow tuple.
+        The source pyramid stores `parent`/`geometry` as strings rather than native struct
+        columns, in either of two formats: valid JSON (e.g. '{"type": "Point", ...}') or a
+        Python dict repr with single quotes (e.g. "{'id': 'PARENT1'}"), which `json.loads` can't
+        parse. `ast.literal_eval` is tried as a fallback to cover that second format.
 
-        This object should represent a DHIS2 organizational unit with the same attribute naming.
+        Args:
+            value: The raw parent/geometry value from the input mapping.
 
-        Parameters
-        ----------
-        org_unit_tuple : tuple
-            A tuple containing organizational unit attributes.
+        Returns:
+            dict | None: The parsed dict, or None if absent/unparseable.
         """
-        # Keep names consistent
-        self.id = org_unit_tuple.id
-        self.name = org_unit_tuple.name
-        self.shortName = org_unit_tuple.shortName
-        self.openingDate = org_unit_tuple.openingDate
-        self.closedDate = org_unit_tuple.closedDate
-        self.parent = org_unit_tuple.parent
-        # Parse geometry safely
-        geometry = org_unit_tuple.geometry
-        if pd.notna(geometry):
-            if isinstance(geometry, str):
-                try:
-                    self.geometry = json.loads(geometry)
-                except json.JSONDecodeError:
-                    self.geometry = None
-            else:
-                self.geometry = geometry
-        else:
-            self.geometry = None
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                pass
+            try:
+                parsed = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return value
+
+    def is_valid(self) -> bool:
+        """Check if the OrgUnit instance has all required attributes set.
+
+        Returns:
+            bool: True if id, name, short_name and opening_date are all non-empty (i.e. neither
+            None nor an empty string; NaN is normalized to None before this runs), False otherwise.
+        """
+        return bool(self.id) and bool(self.name) and bool(self.short_name) and bool(self.opening_date)
 
     def to_json(self) -> dict:
-        """Return a dictionary representation of the organizational unit suitable for DHIS2 API.
+        """Return a dictionary representation of the organisation unit suitable for the DHIS2 API.
 
-        Returns
-        -------
-        dict
-            Dictionary containing the organizational unit's attributes formatted for DHIS2.
+        Returns:
+            dict: Dictionary containing the organisation unit's attributes formatted for DHIS2.
         """
         json_dict = {
             "id": self.id,
             "name": self.name,
-            "shortName": self.shortName,
-            "openingDate": self.openingDate,
+            "shortName": self.short_name,
+            "openingDate": self.opening_date,
         }
 
-        if pd.notna(self.closedDate):
-            json_dict["closedDate"] = self.closedDate
+        if self.closed_date is not None:
+            json_dict["closedDate"] = self.closed_date
 
-        if self.parent and self.parent.get("id") and pd.notna(self.parent.get("id")):
+        if self.parent and self.parent.get("id") is not None:
             json_dict["parent"] = {"id": self.parent.get("id")}
 
-        if self.geometry and pd.notna(self.geometry):
+        if self.geometry is not None:
             json_dict["geometry"] = {
                 "type": self.geometry["type"],
                 "coordinates": self.geometry["coordinates"],
             }
         return json_dict
 
-    def is_valid(self) -> bool:
-        """Check if the OrgUnitObj instance has all required attributes set.
-
-        Returns
-        -------
-        bool
-            True if all required attributes are not None, False otherwise.
-        """
-        return pd.notna(self.id) and pd.notna(self.name) and pd.notna(self.shortName) and pd.notna(self.openingDate)
-
     def __str__(self) -> str:
-        return f"OrgUnitObj({self.id}, {self.name})"
+        return f"OrgUnit({self.id}, {self.name})"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, OrgUnitObj):
-            return NotImplemented
+        if not isinstance(other, OrgUnit):
+            raise OrgUnitError(f"Cannot compare OrgUnit with {type(other)}")
         return (
             self.id == other.id
             and self.name == other.name
-            and self.shortName == other.shortName
-            and self.openingDate == other.openingDate
-            and self.closedDate == other.closedDate
+            and self.short_name == other.short_name
+            and self.opening_date == other.opening_date
+            and self.closed_date == other.closed_date
             and self.parent == other.parent
             and self.geometry == other.geometry
         )

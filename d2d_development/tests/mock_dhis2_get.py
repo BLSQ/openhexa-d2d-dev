@@ -237,6 +237,42 @@ class MockAnalytics:
         ]
 
 
+class MockMeta:
+    """Mock class to simulate DHIS2 metadata API responses for testing purposes."""
+
+    def organisation_units(self, fields: str = "") -> list[dict]:
+        """Simulate the retrieval of organisation units from DHIS2.
+
+        Returns:
+            list[dict]: A list of dictionaries representing organisation units, formatted similarly to
+            what the DHIS2 API would return.
+        """
+        return [
+            {
+                "id": "OU001",
+                "name": "District 1",
+                "shortName": "D1",
+                "openingDate": "2020-01-01",
+                "closedDate": None,
+                "parent": {"id": "COUNTRY"},
+                "level": 2,
+                "path": "/COUNTRY/OU001",
+                "geometry": None,
+            },
+            {
+                "id": "OU002",
+                "name": "District 2 old name",
+                "shortName": "D2",
+                "openingDate": "2020-01-01",
+                "closedDate": None,
+                "parent": {"id": "COUNTRY"},
+                "level": 2,
+                "path": "/COUNTRY/OU002",
+                "geometry": {"type": "Point", "coordinates": [1.0, 2.0]},
+            },
+        ]
+
+
 class MockSession:
     """Mock class to simulate a requests.Session for testing purposes."""
 
@@ -260,5 +296,7 @@ class MockDHIS2Client:
     def __init__(self):
         self.data_value_sets = MockDataValueSets()
         self.analytics = MockAnalytics()
+        self.meta = MockMeta()
         self.api = MockAPI()
         self.session = MockSession()
+        self.version = "2.40.9"
