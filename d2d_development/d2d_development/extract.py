@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import pandas as pd
 import polars as pl
 from openhexa.toolbox.dhis2 import DHIS2
 
@@ -109,7 +108,7 @@ class DataElementsExtractor:
 
         # Transform to pandas first to handle automatic polars schema inference
         return self.extractor._map_to_dhis2_format(
-            pl.from_pandas(pd.DataFrame(response).astype({"value": str})), data_type=DataType.DATA_ELEMENT
+            pl.DataFrame(response, schema_overrides={"value": pl.String}), data_type=DataType.DATA_ELEMENT
         )
 
 
@@ -216,7 +215,7 @@ class IndicatorsExtractor:
             return None
 
         # Transform to pandas first to handle automatic polars schema inference
-        raw_data_formatted = pl.from_pandas(pd.DataFrame(response).astype({"value": str})).rename(
+        raw_data_formatted = pl.DataFrame(response, schema_overrides={"value": pl.String}).rename(
             {"pe": "period", "ou": "orgUnit"}
         )
         if "co" in raw_data_formatted.columns:
@@ -323,7 +322,7 @@ class ReportingRatesExtractor:
             return None
 
         # Transform to pandas first to handle automatic polars schema inference
-        raw_data_formatted = pl.from_pandas(pd.DataFrame(response).astype({"value": str})).rename(
+        raw_data_formatted = pl.DataFrame(response, schema_overrides={"value": pl.String}).rename(
             {"pe": "period", "ou": "orgUnit"}
         )
         return self.extractor._map_to_dhis2_format(raw_data_formatted, data_type=DataType.REPORTING_RATE)

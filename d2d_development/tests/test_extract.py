@@ -67,6 +67,76 @@ def test_extract_map_data_elements():
     assert set(result["value"].drop_nulls()) == {"12", "18", "25", "55.0", "A COMMENT INSTEAD OF A NUMBER"}
 
 
+def test_extract_map_data_elements_preserves_real_null_value():
+    """The `value` column must keep genuine None as a real polars null, not the string "None"."""
+    result = DHIS2Extractor(dhis2_client=MockDHIS2Client()).data_elements._retrieve_data(
+        data_elements=[], org_units=[], period="202501"
+    )
+    null_row = result.filter(pl.col("dx") == "DELETE1")
+    assert null_row["value"].is_null().all()
+    assert null_row["value"].to_list() == [None]
+
+
+def _data_element_record(uid: str, value: object) -> dict:
+    """Build a minimal DHIS2 data value record for the given data element UID and value.
+
+    Returns
+    -------
+    dict
+        A DHIS2 data value record.
+    """
+    return {
+        "dataElement": uid,
+        "period": "202501",
+        "orgUnit": "ORG001",
+        "categoryOptionCombo": "CAT001",
+        "attributeOptionCombo": "ATTR001",
+        "value": value,
+        "storedBy": "user1",
+        "created": "2025-01-01T10:00:00.000+0000",
+        "lastUpdated": "2025-01-01T10:05:00.000+0000",
+        "comment": None,
+        "followup": False,
+    }
+
+
+def test_extract_value_column_mixed_scalar_types_becomes_string():
+    """A `value` column mixing bool/int/float/str/None must build without error and cast to pl.String."""
+    response = [
+        _data_element_record("DE_BOOL", True),
+        _data_element_record("DE_INT", 5),
+        _data_element_record("DE_FLOAT", 5.5),
+        _data_element_record("DE_STR", "text"),
+        _data_element_record("DE_NONE", None),
+    ]
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+    with patch.object(extractor.dhis2_client.data_value_sets, "get", return_value=response):
+        result = extractor.data_elements._retrieve_data(data_elements=[], org_units=[], period="202501")
+
+    assert result["value"].dtype == pl.String
+    assert result.sort("dx")["value"].to_list() == ["true", "5.5", "5", None, "text"]
+    assert result.filter(pl.col("dx") == "DE_NONE")["value"].is_null().all()
+
+
+def test_extract_value_column_type_change_beyond_inference_window_no_computeerror():
+    """A type change in `value` past polars' default row-sampling window must not raise ComputeError.
+
+    Regression test for the scenario that used to raise `ComputeError: could not append value ... to the
+    builder` once a type inconsistent with polars' inferred schema (from its first `infer_schema_length`
+    rows, default 100) appeared later in the response.
+    """
+    response = [_data_element_record(f"DE{i}", i) for i in range(150)]
+    response[120]["value"] = "not-a-number"
+
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+    with patch.object(extractor.dhis2_client.data_value_sets, "get", return_value=response):
+        result = extractor.data_elements._retrieve_data(data_elements=[], org_units=[], period="202501")
+
+    assert result["value"].dtype == pl.String
+    assert result.height == 150
+    assert result.filter(pl.col("dx") == "DE120")["value"].to_list() == ["not-a-number"]
+
+
 def test_extract_map_reporting_rates():
     """Test the mapping of reporting rates."""
     result = DHIS2Extractor(dhis2_client=MockDHIS2Client()).reporting_rates._retrieve_data(
