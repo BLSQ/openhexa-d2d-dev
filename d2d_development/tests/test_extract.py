@@ -77,7 +77,7 @@ def test_extract_map_data_elements_preserves_real_null_value():
     assert null_row["value"].to_list() == [None]
 
 
-def _data_element_record(uid: str, value: object) -> dict:
+def _data_element_record(uid: str, value: object, category_option_combo: object = "CAT001") -> dict:
     """Build a minimal DHIS2 data value record for the given data element UID and value.
 
     Returns
@@ -89,7 +89,7 @@ def _data_element_record(uid: str, value: object) -> dict:
         "dataElement": uid,
         "period": "202501",
         "orgUnit": "ORG001",
-        "categoryOptionCombo": "CAT001",
+        "categoryOptionCombo": category_option_combo,
         "attributeOptionCombo": "ATTR001",
         "value": value,
         "storedBy": "user1",
@@ -135,6 +135,33 @@ def test_extract_value_column_type_change_beyond_inference_window_no_computeerro
     assert result["value"].dtype == pl.String
     assert result.height == 150
     assert result.filter(pl.col("dx") == "DE120")["value"].to_list() == ["not-a-number"]
+
+
+def test_extract_category_option_combo_type_lock_int_then_incompatible_string():
+    """A non-`value` column locked to Int64 by the row-sampling window must not raise ComputeError.
+
+    response = (
+        [{"dx": "a", "co": 1, "value": 5} for _ in range(150)]   # co inferred Int64
+        + [{"dx": "a", "co": "13", "value": 8}]                   # "13" alone -> coerces, NO error
+        + [{"dx": "a", "co": "abc", "value": 8}]                  # "abc" -> ComputeError
+    )
+
+    `co` is the analytics/reporting-rate shorthand for `categoryOptionCombo`. Reusing the same int
+    -> coercible-string -> incompatible-string progression here confirms the fix isn't specific to the
+    `value` column: casting the whole frame to String after a full schema scan protects every column.
+    """
+    response = [_data_element_record(f"DE{i}", 5, category_option_combo=1) for i in range(150)]
+    response.append(_data_element_record("DE_COERCIBLE", 8, category_option_combo="13"))
+    response.append(_data_element_record("DE_INCOMPATIBLE", 8, category_option_combo="abc"))
+
+    extractor = DHIS2Extractor(dhis2_client=MockDHIS2Client())
+    with patch.object(extractor.dhis2_client.data_value_sets, "get", return_value=response):
+        result = extractor.data_elements._retrieve_data(data_elements=[], org_units=[], period="202501")
+
+    assert result["category_option_combo"].dtype == pl.String
+    assert result.height == 152
+    assert result.filter(pl.col("dx") == "DE_COERCIBLE")["category_option_combo"].to_list() == ["13"]
+    assert result.filter(pl.col("dx") == "DE_INCOMPATIBLE")["category_option_combo"].to_list() == ["abc"]
 
 
 def test_extract_map_reporting_rates():

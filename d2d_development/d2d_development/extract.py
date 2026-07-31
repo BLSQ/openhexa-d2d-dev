@@ -106,9 +106,8 @@ class DataElementsExtractor:
         if not response:
             return None
 
-        # Transform to pandas first to handle automatic polars schema inference
         return self.extractor._map_to_dhis2_format(
-            pl.DataFrame(response, schema_overrides={"value": pl.String}), data_type=DataType.DATA_ELEMENT
+            pl.DataFrame(response, infer_schema_length=None).cast(pl.String), data_type=DataType.DATA_ELEMENT
         )
 
 
@@ -214,9 +213,8 @@ class IndicatorsExtractor:
         if not response:
             return None
 
-        # Transform to pandas first to handle automatic polars schema inference
-        raw_data_formatted = pl.DataFrame(response, schema_overrides={"value": pl.String}).rename(
-            {"pe": "period", "ou": "orgUnit"}
+        raw_data_formatted = (
+            pl.DataFrame(response, infer_schema_length=None).cast(pl.String).rename({"pe": "period", "ou": "orgUnit"})
         )
         if "co" in raw_data_formatted.columns:
             raw_data_formatted = raw_data_formatted.rename({"co": "categoryOptionCombo"})
@@ -321,9 +319,8 @@ class ReportingRatesExtractor:
         if not response:
             return None
 
-        # Transform to pandas first to handle automatic polars schema inference
-        raw_data_formatted = pl.DataFrame(response, schema_overrides={"value": pl.String}).rename(
-            {"pe": "period", "ou": "orgUnit"}
+        raw_data_formatted = (
+            pl.DataFrame(response, infer_schema_length=None).cast(pl.String).rename({"pe": "period", "ou": "orgUnit"})
         )
         return self.extractor._map_to_dhis2_format(raw_data_formatted, data_type=DataType.REPORTING_RATE)
 
