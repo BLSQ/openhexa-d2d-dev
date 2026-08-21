@@ -90,7 +90,7 @@ class DHIS2PushCache:
         Returns:
             The periods present in the data.
         """
-        return data["period"].unique().to_list()
+        return data["period"].unique().sort().to_list()
 
     def _load(self, periods: list[str]) -> None:
         """Reads cache_<period>.parquet files matching `periods` into self._cache_data.
@@ -120,7 +120,7 @@ class DHIS2PushCache:
 
     def _create_cache(self, data: pl.DataFrame) -> None:
         """Creates a new cache from the provided data."""
-        periods = data["period"].unique().to_list()
+        periods = self._resolve_data_periods(data)
         key_columns = [c for c in self._mandatory_fields if c != "value"]
         for period in periods:
             period_data = data.filter(pl.col("period") == period).unique(subset=key_columns, keep="last")
@@ -134,7 +134,7 @@ class DHIS2PushCache:
         not previously cached are simply added.
         """
         key_columns = [c for c in self._mandatory_fields if c != "value"]
-        periods = data_pushed["period"].unique().to_list()
+        periods = self._resolve_data_periods(data_pushed)
         for period in periods:
             period_data = data_pushed.filter(pl.col("period") == period).unique(subset=key_columns, keep="last")
             cached_period_data = self._cache_data.filter(pl.col("period") == period)
