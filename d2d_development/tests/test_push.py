@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import polars as pl
@@ -5,6 +6,7 @@ import pytest
 
 from d2d_development.extract import DHIS2Extractor
 from d2d_development.push import DHIS2Pusher, PusherError
+from d2d_development.push_cache import DHIS2PushCache
 from tests.mock_dhis2_get import MockDHIS2Client
 from tests.mock_dhis2_post import (
     MOCK_DHIS2_ERROR_409_RESPONSE_AOC,
@@ -543,9 +545,150 @@ def test_push_summary_rejected_points():
         return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_AOC, status_code=409),
     ):
         pusher._push_data_points(invalid_data_points)  # access private method for error handling testing
-        assert pusher.summary["rejected_datapoints"][0]["datapoint"] == invalid_dp_1
-        assert pusher.summary["rejected_datapoints"][1]["datapoint"] == invalid_dp_2
+        assert pusher.summary["rejected_datapoints"][0] == invalid_dp_1
+        assert pusher.summary["rejected_datapoints"][1] == invalid_dp_2
 
 
-if __name__ == "__main__":
-    test_push_classify_points()
+def test_remove_rejected_points_matches_by_datapoint_identity():
+    """Test that _remove_rejected_points() removes rejected rows from data by their actual identity.
+
+    rejected_datapoints entries are the serialized DHIS2 payload (DHIS2-cased keys), so this also
+    locks in that they get correctly remapped to the internal snake_case key columns before matching.
+    """
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111", "BBB222", "CCC333"],
+            "period": ["202501", "202501", "202501"],
+            "org_unit": ["ORG001", "ORG002", "ORG003"],
+            "category_option_combo": ["CAT001", "CAT002", "CAT003"],
+            "attribute_option_combo": ["ATTR001", "ATTR002", "ATTR003"],
+            "value": ["10", "20", "30"],
+        }
+    )
+    pusher.summary["rejected_datapoints"] = [
+        {
+            "dataElement": "AAA111",
+            "period": "202501",
+            "orgUnit": "ORG001",
+            "categoryOptionCombo": "CAT001",
+            "attributeOptionCombo": "ATTR001",
+            "value": "10",
+        },
+        {
+            "dataElement": "BBB222",
+            "period": "202501",
+            "orgUnit": "ORG002",
+            "categoryOptionCombo": "CAT002",
+            "attributeOptionCombo": "ATTR002",
+            "value": "20",
+        },
+    ]
+
+    result = pusher._remove_rejected_points(data)
+
+    assert result.height == 1
+    assert result["dx"].to_list() == ["CCC333"]
+
+
+def test_remove_rejected_points_with_no_rejections_returns_data_unchanged():
+    """Test that _remove_rejected_points() returns the input unchanged when nothing was rejected."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client())
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111"],
+            "period": ["202501"],
+            "org_unit": ["ORG001"],
+            "category_option_combo": ["CAT001"],
+            "attribute_option_combo": ["ATTR001"],
+            "value": ["10"],
+        }
+    )
+
+    result = pusher._remove_rejected_points(data)
+
+    assert result.height == 1
+    assert result["dx"].to_list() == ["AAA111"]
+
+
+def test_push_data_with_cache_skips_unchanged_datapoints_on_second_run(tmp_path: Path):
+    """Test that a second push_data() call with a real cache_path skips datapoints unchanged since the first."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111", "BBB222"],
+            "period": ["202501", "202501"],
+            "org_unit": ["ORG001", "ORG002"],
+            "category_option_combo": ["CAT001", "CAT002"],
+            "attribute_option_combo": ["ATTR001", "ATTR002"],
+            "value": ["10", "20"],
+        }
+    )
+
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE),
+    ) as mock_post:
+        pusher.push_data(data)
+        assert mock_post.call_count == 1
+
+        pusher.push_data(data)  # same data again - nothing changed since the first run
+        assert mock_post.call_count == 1, "No new POST should happen: both datapoints were already cached."
+
+
+def test_push_data_with_cache_writes_pushed_datapoints_to_disk(tmp_path: Path):
+    """Test that a successful push_data() call with cache_path persists the pushed datapoints to disk."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111"],
+            "period": ["202501"],
+            "org_unit": ["ORG001"],
+            "category_option_combo": ["CAT001"],
+            "attribute_option_combo": ["ATTR001"],
+            "value": ["10"],
+        }
+    )
+
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE),
+    ):
+        pusher.push_data(data)
+
+    # read back the cache independently, from a fresh instance, to confirm it was actually persisted to disk
+    cache = DHIS2PushCache(cache_path=tmp_path)
+    cache._load(["202501"])
+    assert cache._cache_data is not None
+    assert cache._cache_data["dx"].to_list() == ["AAA111"]
+    assert cache._cache_data["value"].to_list() == ["10"]
+
+
+def test_push_data_with_cache_excludes_rejected_datapoint_from_disk_cache(tmp_path: Path):
+    """Test that a datapoint rejected by DHIS2 is excluded from the cache, while accepted ones are kept."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    data = pl.DataFrame(
+        {
+            "dx": ["VALID1", "VALID2", "VALID3"],
+            "period": ["202501", "202501", "202501"],
+            "org_unit": ["ORG001", "ORG002", "ORG003"],
+            "category_option_combo": ["CAT001", "CAT002", "CAT003"],
+            "attribute_option_combo": ["ATTR001", "ATTR002", "ATTR003"],
+            "value": ["1", "0.0000e15", "1"],  # VALID2's value format gets rejected by DHIS2
+        }
+    )
+
+    # MOCK_DHIS2_ERROR_409_RESPONSE_VALUE_FORMAT rejects the datapoint at index 1 (VALID2)
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_ERROR_409_RESPONSE_VALUE_FORMAT, status_code=409),
+    ):
+        pusher.push_data(data)
+
+    cache = DHIS2PushCache(cache_path=tmp_path)
+    cache._load(["202501"])
+    assert cache._cache_data is not None
+    assert sorted(cache._cache_data["dx"].to_list()) == ["VALID1", "VALID3"]
