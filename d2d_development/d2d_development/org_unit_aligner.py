@@ -15,9 +15,9 @@ from .utils import log_message
 # `parent` and `geometry` are nested dict-or-None fields whose shape varies across rows
 # (DHIS2 geometry coordinates nest differently for Point vs Polygon org units). Letting polars
 # auto-infer a Struct schema for them risks the same schema-inference failures already hit in
-# extract.py, so they're built as an explicit Object-dtype Series instead (see
-# `_records_to_polars`), keeping them as opaque Python objects exactly like pandas' `object` dtype.
-_OBJECT_DTYPE_COLUMNS = ("parent", "geometry")
+# extract.py, so they're stringified instead (see `_records_to_polars`) and parsed back by
+# `OrgUnit`'s `parent`/`geometry` field validator.
+_STRINGIFIED_COLUMNS = ("parent", "geometry")
 
 
 def _is_nan(value: object) -> bool:
@@ -33,35 +33,30 @@ def _is_nan(value: object) -> bool:
 
 
 def _records_to_polars(records: list[dict]) -> pl.DataFrame:
-    """Build a polars DataFrame from row records, keeping nested columns as Object dtype.
+    """Build a polars DataFrame from row records, guarding against two silent-corruption pitfalls.
 
-    A missing value coming from `pd.DataFrame.to_dict("records")` surfaces as a bare float NaN
-    rather than None. Left as-is, building a typed (e.g. string) column from such a record makes
-    polars silently stringify it to the literal text "NaN" instead of a null, so NaN is normalized
-    to None here before any DataFrame gets built.
+    `parent`/`geometry` are converted to their Python `str()` representation before polars ever
+    sees them, since their nested shape varies by row (e.g. Point vs Polygon geometry) and would
+    otherwise risk a Struct schema-inference crash; `OrgUnit`'s field validator parses that
+    representation back into a dict. Separately, a missing value from
+    `pd.DataFrame.to_dict("records")` surfaces as a bare float NaN rather than None, which would
+    otherwise get silently stringified to the literal text "NaN" in a typed column, so it's
+    normalized to None here too.
 
     Args:
         records: Row records, e.g. a raw DHIS2 API response or `pd.DataFrame.to_dict("records")`.
 
     Returns:
-        pl.DataFrame: DataFrame with `parent`/`geometry` (if present) kept as Object dtype so
-        polars never attempts Struct schema inference on them.
+        pl.DataFrame: Records converted to columns, safe from both pitfalls above.
     """
     if not records:
         return pl.DataFrame(records)
 
-    records = [{k: (None if _is_nan(v) else v) for k, v in record.items()} for record in records]
-
-    # Check every record, not just the first: records can be ragged (e.g. a raw DHIS2 API
-    # response where a field is omitted entirely for some org units rather than set to null).
-    present_object_columns = [col for col in _OBJECT_DTYPE_COLUMNS if any(col in record for record in records)]
-    object_columns = {col: [record.get(col) for record in records] for col in present_object_columns}
-    plain_records = [{k: v for k, v in record.items() if k not in _OBJECT_DTYPE_COLUMNS} for record in records]
-
-    df = pl.DataFrame(plain_records)
-    if object_columns:
-        df = df.with_columns([pl.Series(col, values, dtype=pl.Object) for col, values in object_columns.items()])
-    return df
+    records = [
+        {k: (None if _is_nan(v) else (str(v) if k in _STRINGIFIED_COLUMNS else v)) for k, v in record.items()}
+        for record in records
+    ]
+    return pl.DataFrame(records)
 
 
 class DHIS2PyramidAligner:
@@ -76,15 +71,27 @@ class DHIS2PyramidAligner:
     Usage: Instantiate with a logger and call align_to().
     """
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger, clear_missing_fields: bool = False):
+        """Initialize the aligner.
+
+        Args:
+            logger: Logger to use for reporting progress and errors.
+            clear_missing_fields: Controls how an UPDATE handles a nullable field
+                (`closedDate`/`parent`/`geometry`) that is unset in the source but set on the
+                target. By default (False), the source is treated as additive/corrective only:
+                such a field is omitted from the payload and DHIS2 keeps the target's existing
+                value untouched. Set to True to treat the source as fully authoritative instead:
+                the field is sent as an explicit `null`, clearing the target's existing value.
+        """
         self.logger = logger if logger else logging.getLogger(__name__)
         self.log_function = log_message
+        self.clear_missing_fields = clear_missing_fields
         self._initialize_summary()
 
     def _initialize_summary(self):
         self.summary = {
-            "CREATE": {"CREATED": [], "INVALID": [], "MALFORMED": [], "ERROR": []},
-            "UPDATE": {"UPDATED": [], "INVALID": [], "MALFORMED": [], "ERROR": []},
+            "create": {"created": [], "invalid": [], "malformed": [], "error": []},
+            "update": {"updated": [], "invalid": [], "malformed": [], "error": []},
         }
 
     def align_to(
@@ -116,6 +123,10 @@ class DHIS2PyramidAligner:
             msg = "Unexpected error occurred while retrieving organisation units from target DHIS2."
             self._log_message(message=msg, level="error", error_details=str(e))
             raise OrgUnitAlignError(f"{msg} {e}") from e
+
+        if "id" not in target_pyramid.columns:
+            # In case of an empty target (e.g. a new DHIS2 instance)
+            target_pyramid = pl.DataFrame({"id": []}, schema={"id": pl.String})
 
         self._log_message(f"Shape target pyramid: {target_pyramid.shape}")
 
@@ -190,13 +201,13 @@ class DHIS2PyramidAligner:
             try:
                 ou = OrgUnit.model_validate(record)
             except (OrgUnitError, ValidationError) as e:
-                self._log_error_ou(record, import_strategy="CREATE", error_type="MALFORMED", error_details=str(e))
+                self._log_error_ou(record, import_strategy="create", error_type="malformed", error_details=str(e))
                 continue
 
             if ou.is_valid():
-                self._handle_org_unit_push(ou=ou, target_dhis2=target_dhis2, import_strategy="CREATE")
+                self._handle_org_unit_push(ou=ou, target_dhis2=target_dhis2, import_strategy="create")
             else:
-                self._log_error_ou(ou.to_json(), import_strategy="CREATE", error_type="INVALID")
+                self._log_error_ou(ou.to_json(), import_strategy="create", error_type="invalid")
 
     def _handle_org_unit_push(self, ou: OrgUnit, target_dhis2: DHIS2, import_strategy: str) -> None:
         """Handle the creation of an organisation unit in the target DHIS2 instance."""
@@ -207,7 +218,7 @@ class DHIS2PyramidAligner:
                 import_strategy=import_strategy,
             )
         except Exception as e:
-            self._log_error_ou(ou.to_json(), import_strategy=import_strategy, error_type="ERROR", error_details=str(e))
+            self._log_error_ou(ou.to_json(), import_strategy=import_strategy, error_type="error", error_details=str(e))
             return
 
         self._handle_response(response=response, ou=ou, import_strategy=import_strategy)
@@ -218,7 +229,7 @@ class DHIS2PyramidAligner:
             self._log_error_ou(
                 ou.to_json(),
                 import_strategy=import_strategy,
-                error_type="ERROR",
+                error_type="error",
                 error_details="No response received from DHIS2 API",
             )
             return
@@ -227,7 +238,7 @@ class DHIS2PyramidAligner:
             self._log_error_ou(
                 ou.to_json(),
                 import_strategy=import_strategy,
-                error_type="ERROR",
+                error_type="error",
                 error_details="Invalid response format",
             )
             return
@@ -236,18 +247,18 @@ class DHIS2PyramidAligner:
             self._log_error_ou(
                 ou.to_json(),
                 import_strategy=import_strategy,
-                error_type="ERROR",
-                error_details=f"Failed to {import_strategy.lower()} organisation unit: {response}",
+                error_type="error",
+                error_details=f"Failed to {import_strategy} organisation unit: {response}",
             )
             return
 
-        action_str = "CREATED" if import_strategy == "CREATE" else "UPDATED"
+        action_str = "created" if import_strategy == "create" else "updated"
         self.summary[import_strategy][action_str].append(ou.to_json())
-        self._log_message(
-            f"Organisation unit {action_str.lower()}: {ou.to_json()}", level="info", log_current_run=False
-        )
+        self._log_message(f"Organisation unit {action_str}: {ou.to_json()}", level="info", log_current_run=False)
 
-    def _log_error_ou(self, ou: dict, import_strategy: str, error_type: str, error_details: str | None) -> None:
+    def _log_error_ou(
+        self, ou: dict, import_strategy: str, error_type: str, error_details: str | None = None
+    ) -> None:
         self.summary[import_strategy][error_type].append(ou)
         error_str = f"Error: {error_details}" if error_details else None
         self._log_message(
@@ -295,7 +306,7 @@ class DHIS2PyramidAligner:
             try:
                 source_by_id[record["id"]] = OrgUnit.model_validate(record)
             except (OrgUnitError, ValidationError) as e:
-                self._log_error_ou(record, import_strategy="UPDATE", error_type="MALFORMED", error_details=str(e))
+                self._log_error_ou(record, import_strategy="update", error_type="malformed", error_details=str(e))
 
         total_ou = len(ou_ids_to_check)
         for progress_count, ou_id in enumerate(ou_ids_to_check, start=1):
@@ -303,10 +314,10 @@ class DHIS2PyramidAligner:
             ou_target = target_by_id.get(ou_id)
             if ou_source is not None and ou_target is not None:
                 if not ou_source.is_valid():
-                    self._log_error_ou(ou_source.to_json(), import_strategy="UPDATE", error_type="INVALID")
+                    self._log_error_ou(ou_source.to_json(), import_strategy="update", error_type="invalid")
                 # NOTE: See OrgUnit.__eq__() to check the comparison logic
                 elif ou_source != ou_target:
-                    self._handle_org_unit_push(ou=ou_source, target_dhis2=target_dhis2, import_strategy="UPDATE")
+                    self._handle_org_unit_push(ou=ou_source, target_dhis2=target_dhis2, import_strategy="update")
 
             if progress_count % logging_interval == 0 or progress_count == total_ou:
                 self._log_message(f"Organisation units checked: {progress_count}/{total_ou} for update.")
@@ -315,31 +326,33 @@ class DHIS2PyramidAligner:
         self,
         dhis2_client: DHIS2,
         org_unit: OrgUnit,
-        import_strategy: str = "CREATE",
+        import_strategy: str = "create",
     ) -> dict:
         """Pushes an organisation unit to the DHIS2 instance using the specified strategy.
 
         Args:
             dhis2_client: The DHIS2 client instance to use for the API call.
             org_unit: The organisation unit to push.
-            import_strategy: The strategy to use for the import ("CREATE" or "UPDATE").
+            import_strategy: The strategy to use for the import ("create" or "update").
 
         Returns:
             dict: The response from the DHIS2 API.
         """
-        if import_strategy == "CREATE":
+        if import_strategy == "create":
             endpoint = "organisationUnits"
             payload = org_unit.to_json()
 
-        if import_strategy == "UPDATE":
+        if import_strategy == "update":
             endpoint = "metadata"
-            payload = {"organisationUnits": [org_unit.to_json()]}
+            payload = {"organisationUnits": [org_unit.to_json(include_none_fields=self.clear_missing_fields)]}
 
         try:
             r = dhis2_client.api.session.post(
                 f"{dhis2_client.api.url}/{endpoint}",
                 json=payload,
-                params={"importStrategy": f"{import_strategy}"},
+                # DHIS2's importStrategy query param is a fixed, uppercase vocabulary
+                # (CREATE/UPDATE/...); import_strategy is kept lowercase internally.
+                params={"importStrategy": import_strategy.upper()},
             )
             r.raise_for_status()
             return r.json()

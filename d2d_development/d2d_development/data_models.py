@@ -134,8 +134,14 @@ class OrgUnit(BaseModel):  # noqa: PLW1641 (no hashing)
         """
         return bool(self.id) and bool(self.name) and bool(self.short_name) and bool(self.opening_date)
 
-    def to_json(self) -> dict:
+    def to_json(self, include_none_fields: bool = False) -> dict:
         """Return a dictionary representation of the organisation unit suitable for the DHIS2 API.
+
+        Args:
+            include_none_fields: If True, `closedDate`/`parent`/`geometry` are included as an
+                explicit `null` when unset instead of being omitted. Omitting a field leaves
+                DHIS2's existing value untouched on UPDATE; including it as `null` clears it. Has
+                no effect for a CREATE payload, since there is no existing value to clear.
 
         Returns:
             dict: Dictionary containing the organisation unit's attributes formatted for DHIS2.
@@ -149,15 +155,21 @@ class OrgUnit(BaseModel):  # noqa: PLW1641 (no hashing)
 
         if self.closed_date is not None:
             json_dict["closedDate"] = self.closed_date
+        elif include_none_fields:
+            json_dict["closedDate"] = None
 
         if self.parent and self.parent.get("id") is not None:
             json_dict["parent"] = {"id": self.parent.get("id")}
+        elif include_none_fields:
+            json_dict["parent"] = None
 
         if self.geometry is not None:
             json_dict["geometry"] = {
                 "type": self.geometry["type"],
                 "coordinates": self.geometry["coordinates"],
             }
+        elif include_none_fields:
+            json_dict["geometry"] = None
         return json_dict
 
     def __str__(self) -> str:
