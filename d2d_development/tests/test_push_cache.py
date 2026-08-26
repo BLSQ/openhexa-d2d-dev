@@ -122,9 +122,9 @@ def test_filter_new_across_multiple_periods_some_without_cache(tmp_path: Path):
 def test_filter_new_keeps_rows_where_value_is_none_on_either_side(tmp_path: Path):
     """Test that filter_new() keeps rows where only one side of the value comparison is None.
 
-    Guards against a Polars null-propagation pitfall: comparing None to a non-null value with the
-    plain `!=` operator yields null (not True), so such rows would be silently dropped instead of
-    being treated as changed. Covers both directions: a cached value replaced by None, and a cached
+    Locks in the use of `ne_missing()` instead of a plain `!=` comparison: `!=` propagates null when
+    either side is None (yielding null, not True), which would silently drop these rows instead of
+    treating them as changed. Covers both directions: a cached value replaced by None, and a cached
     None replaced by a real value.
     """
     cached_data = pl.DataFrame(
@@ -166,6 +166,49 @@ def test_filter_new_keeps_rows_where_value_is_none_on_either_side(tmp_path: Path
     assert cached.height == 3
     assert cached["dx"].to_list() == ["DE1", "DE2", "DE3"]
     assert cached["value"].to_list() == ["10", "20", None]
+
+
+def test_filter_new_drops_row_where_value_is_none_on_both_sides(tmp_path: Path):
+    """Test that filter_new() drops a row whose value is None in both the cache and the incoming data.
+
+    A matched row whose cached value is None is indistinguishable from "no cache match at all" using
+    a plain null check on the joined value column - both produce a null after the left join. Guards
+    against that ambiguity causing an already-deleted datapoint (None on both sides, i.e. unchanged)
+    to be treated as new and re-pushed on every run. Also checks that filter_new() returns exactly the
+    mandatory columns, with no join artifacts (e.g. `value_cached`) leaked into the result.
+    """
+    cached_data = pl.DataFrame(
+        {
+            "dx": ["DE1"],
+            "period": ["202501"],
+            "org_unit": ["OU1"],
+            "category_option_combo": ["COC1"],
+            "attribute_option_combo": ["AOC1"],
+            "value": [None],
+        },
+        schema=dict.fromkeys(CACHE_COLUMNS, pl.Utf8),
+    )
+    cached_data.write_parquet(tmp_path / "cache_202501.parquet")
+
+    data = pl.DataFrame(
+        {
+            "dx": ["DE1", "DE2"],
+            "period": ["202501", "202501"],
+            "org_unit": ["OU1", "OU2"],
+            "category_option_combo": ["COC1", "COC1"],
+            "attribute_option_combo": ["AOC1", "AOC1"],
+            # DE1: cached as None, pushed as None again -> unchanged, must be dropped
+            # DE2: not in the cache at all -> new, must be kept
+            "value": [None, "30"],
+        },
+        schema=dict.fromkeys(CACHE_COLUMNS, pl.Utf8),
+    )
+
+    push_cache = DHIS2PushCache(cache_path=tmp_path)
+    result = push_cache.filter_new(data)
+
+    assert result["dx"].to_list() == ["DE2"]
+    assert result.columns == CACHE_COLUMNS
 
 
 def test_filter_new_with_empty_data_short_circuits_before_loading_cache(tmp_path: Path):

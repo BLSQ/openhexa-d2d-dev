@@ -52,12 +52,16 @@ class DHIS2PushCache:
             self._log_message("No cache data found. All rows will be pushed.", log_current_run=self.verbose)
             return data
 
-        to_push = data.join(
-            self._cache_data,
-            on=[c for c in self._mandatory_fields if c != "value"],
-            how="left",
-            suffix="_cached",
-        ).filter(pl.col("value_cached").is_null() | pl.col("value").ne_missing(pl.col("value_cached")))
+        to_push = (
+            data.join(
+                self._cache_data.with_columns(pl.lit(value=True).alias("_cache_hit")),
+                on=[c for c in self._mandatory_fields if c != "value"],
+                how="left",
+                suffix="_cached",
+            )
+            .filter(pl.col("_cache_hit").is_null() | pl.col("value").ne_missing(pl.col("value_cached")))
+            .select(data.columns)
+        )
 
         self._log_message(
             f"Filtered {data.height - to_push.height} rows already pushed to DHIS2.", log_current_run=self.verbose
