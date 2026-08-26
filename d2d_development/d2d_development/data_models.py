@@ -101,9 +101,11 @@ class OrgUnit(BaseModel):  # noqa: PLW1641 (no hashing)
         """Parse a stringified dict into a dict, passing actual dicts and None through.
 
         The source pyramid stores `parent`/`geometry` as strings rather than native struct
-        columns, in either of two formats: valid JSON (e.g. '{"type": "Point", ...}') or a
-        Python dict repr with single quotes (e.g. "{'id': 'PARENT1'}"), which `json.loads` can't
-        parse. `ast.literal_eval` is tried as a fallback to cover that second format.
+        columns, in either of two formats: a Python dict repr with single quotes (e.g.
+        "{'id': 'PARENT1'}", the common case produced by `DHIS2PyramidAligner`'s own
+        stringification) or valid JSON (e.g. '{"type": "Point", ...}'). `ast.literal_eval` is
+        tried first since it parses both the repr format and most JSON (anything but
+        `true`/`false`/`null` literals); `json.loads` is the fallback for that remaining case.
 
         Args:
             value: The raw parent/geometry value from the input mapping.
@@ -113,15 +115,15 @@ class OrgUnit(BaseModel):  # noqa: PLW1641 (no hashing)
         """
         if value is None:
             return None
+
         if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                pass
             try:
                 parsed = ast.literal_eval(value)
             except (ValueError, SyntaxError):
-                return None
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    return None
             return parsed if isinstance(parsed, dict) else None
         return value
 
