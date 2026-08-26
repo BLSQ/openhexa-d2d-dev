@@ -613,7 +613,7 @@ def test_remove_rejected_points_with_no_rejections_returns_data_unchanged():
 
 def test_push_data_with_cache_skips_unchanged_datapoints_on_second_run(tmp_path: Path):
     """Test that a second push_data() call with a real cache_path skips datapoints unchanged since the first."""
-    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=False)
     data = pl.DataFrame(
         {
             "dx": ["AAA111", "BBB222"],
@@ -639,7 +639,7 @@ def test_push_data_with_cache_skips_unchanged_datapoints_on_second_run(tmp_path:
 
 def test_push_data_with_cache_writes_pushed_datapoints_to_disk(tmp_path: Path):
     """Test that a successful push_data() call with cache_path persists the pushed datapoints to disk."""
-    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=False)
     data = pl.DataFrame(
         {
             "dx": ["AAA111"],
@@ -668,7 +668,7 @@ def test_push_data_with_cache_writes_pushed_datapoints_to_disk(tmp_path: Path):
 
 def test_push_data_with_cache_excludes_rejected_datapoint_from_disk_cache(tmp_path: Path):
     """Test that a datapoint rejected by DHIS2 is excluded from the cache, while accepted ones are kept."""
-    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path)
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=False)
     data = pl.DataFrame(
         {
             "dx": ["VALID1", "VALID2", "VALID3"],
@@ -692,3 +692,56 @@ def test_push_data_with_cache_excludes_rejected_datapoint_from_disk_cache(tmp_pa
     cache._load(["202501"])
     assert cache._cache_data is not None
     assert sorted(cache._cache_data["dx"].to_list()) == ["VALID1", "VALID3"]
+
+
+def test_push_data_with_dry_run_bypasses_cache_entirely(tmp_path: Path):
+    """Test that dry_run=True disables the cache even when a cache_path is given.
+
+    Seeds the cache with AAA111=10 and BBB222=20, then pushes AAA111=10 (unchanged) and
+    BBB222=99 (changed) with dry_run=True. If the cache were active, filter_new() would drop
+    AAA111 as unchanged and only push BBB222. With the cache disabled, both rows must be pushed
+    unfiltered, and the on-disk cache must remain exactly as seeded.
+    """
+    seed_cache = DHIS2PushCache(cache_path=tmp_path)
+    seed_cache.mark_pushed(
+        pl.DataFrame(
+            {
+                "dx": ["AAA111", "BBB222"],
+                "period": ["202501", "202501"],
+                "org_unit": ["ORG001", "ORG002"],
+                "category_option_combo": ["CAT001", "CAT002"],
+                "attribute_option_combo": ["ATTR001", "ATTR002"],
+                "value": ["10", "20"],
+            }
+        )
+    )
+
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=True)
+    assert pusher.push_cache is None
+
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111", "BBB222"],
+            "period": ["202501", "202501"],
+            "org_unit": ["ORG001", "ORG002"],
+            "category_option_combo": ["CAT001", "CAT002"],
+            "attribute_option_combo": ["ATTR001", "ATTR002"],
+            "value": ["10", "99"],
+        }
+    )
+
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE),
+    ) as mock_post:
+        pusher.push_data(data)
+
+    pushed = mock_post.call_args.kwargs["json"]["dataValues"]
+    assert sorted(dv["dataElement"] for dv in pushed) == ["AAA111", "BBB222"]
+
+    cache_after = DHIS2PushCache(cache_path=tmp_path)
+    cache_after._load(["202501"])
+    cached = cache_after._cache_data.sort("dx")
+    assert cached["dx"].to_list() == ["AAA111", "BBB222"]
+    assert cached["value"].to_list() == ["10", "20"]

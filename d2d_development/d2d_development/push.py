@@ -160,7 +160,7 @@ class DHIS2Pusher:
 
     def _initialize_cache(self, cache_path: Path | None) -> None:
         """Initialize the cache for tracking pushed data points."""
-        if cache_path is None:
+        if cache_path is None or self.dry_run:
             self.push_cache = None
             return
 

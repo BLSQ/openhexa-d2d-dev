@@ -238,6 +238,7 @@ from d2d_development.push import DHIS2Pusher
 pusher = DHIS2Pusher(
 	dhis2_client,
 	cache_path=Path("/path/to/persistent/cache"),  # must persist across runs
+	dry_run=False,  # the cache is only used when dry_run is False
 )
 
 pusher.push_data(df)
@@ -249,15 +250,16 @@ If `cache_path` is omitted (the default), caching is disabled entirely and `push
 - Before pushing, `push_data` filters out any datapoint whose key and value exactly match what's cached from a previous run.
 - After a push, only datapoints that DHIS2 actually accepted are recorded in the cache - a datapoint rejected by DHIS2 (see `rejected_datapoints` in the summary above) is left out, so it will be attempted again on the next run instead of being silently treated as done.
 - The cache is stored on disk as one `cache_<period>.parquet` file per period inside `cache_path`, so `cache_path` should point to a location that persists between pipeline runs (not a temporary directory), otherwise the cache provides no benefit.
+- If `dry_run` is `True` (the default), the cache is not used at all, even when `cache_path` is set: datapoints are not filtered against it, and it is not updated with the datapoints from this run. This keeps a dry run from marking datapoints as pushed when nothing was actually sent to DHIS2. Pass `dry_run=False` to enable the cache.
 
 **Performance tip:** if you push several distinct datasets (e.g. different extract groups) to the same DHIS2 instance, use a separate `cache_path` per dataset rather than sharing one. Each `cache_<period>.parquet` file is fully read and rewritten on every push, so a shared cache grows with the combined size of every dataset using it, not just the size of the one being pushed.
 
 ```python
 base_cache_dir = Path("/path/to/persistent/cache")
 
-pusher_dataset_a = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_a")
+pusher_dataset_a = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_a", dry_run=False)
 pusher_dataset_a.push_data(df_a)
 
-pusher_dataset_b = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_b")
+pusher_dataset_b = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_b", dry_run=False)
 pusher_dataset_b.push_data(df_b)
 ```
