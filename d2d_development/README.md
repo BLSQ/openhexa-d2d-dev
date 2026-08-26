@@ -154,6 +154,7 @@ When initializing `DHIS2Pusher`, you can configure the following parameters:
 - `max_post`: Maximum number of data points per POST request (default: `500`).
 - `logging_interval`: Log progress every N data points (default: `50000`).
 - `logger`: Optional custom logger instance.
+- `cache_path`: Optional `Path`. If provided, enables push caching so datapoints that haven't changed since the last successful push are skipped (default: `None`, caching disabled). See [Caching Pushed Datapoints](#caching-pushed-datapoints-avoid-re-pushing-unchanged-data) below.
 
 **Usage Example:**
 ```python
@@ -190,6 +191,7 @@ After calling `push_data`, the `DHIS2Pusher` instance provides detailed results 
 - `import_counts`: Number of data points imported, updated, ignored, or deleted (dict with keys: `imported`, `updated`, `ignored`, `deleted`).
 - `import_options`: The options used for the import (strategy, dry run, etc).
 - `import_errors`: List of errors, conflicts, or error reports returned by DHIS2 or encountered during the push.
+- `rejected_datapoints`: List of data points that were rejected by DHIS2 itself (e.g. a conflict on a specific value), identified from the API response.
 - `ignored_data_points`: List of data points that were ignored due to missing or invalid fields.
 - `delete_data_points`: List of data points that were marked for deletion (value is NA/null).
 
@@ -202,6 +204,7 @@ print(pusher.summary)
 #   'import_counts': {'imported': 1, 'updated': 0, 'ignored': 0, 'deleted': 0},
 #   'import_options': {'importStrategy': 'CREATE_AND_UPDATE', 'dryRun': False, ...},
 #   'import_errors': [],
+#   'rejected_datapoints': [],
 #   'ignored_data_points': [],
 #   'delete_data_points': []
 # }
@@ -217,3 +220,46 @@ if pusher.summary["ignored_data_points"]:
 ```
 
 ---
+
+### Caching Pushed Datapoints (avoid re-pushing unchanged data)
+
+**Description:**
+`DHIS2Pusher` can optionally track which datapoints have already been successfully pushed to DHIS2, so that subsequent runs only push datapoints that are new or have changed. This is useful for pipelines that run repeatedly (e.g. on a schedule) over largely the same data, where re-sending unchanged values on every run wastes time and DHIS2 API calls.
+
+A datapoint is identified by its key columns (`dx`, `period`, `orgUnit`, `categoryOptionCombo`, `attributeOptionCombo`). It's considered unchanged, and therefore skipped, only if its `value` is identical to the last successfully pushed value for that same key. Any difference in `value` - including a change to or from a null/NA value (a deletion) - is treated as new and gets pushed.
+
+**Enabling the cache:**
+Pass a `cache_path` when creating `DHIS2Pusher`:
+
+```python
+from pathlib import Path
+from d2d_development.push import DHIS2Pusher
+
+pusher = DHIS2Pusher(
+	dhis2_client,
+	cache_path=Path("/path/to/persistent/cache"),  # must persist across runs
+	dry_run=False,  # the cache is only used when dry_run is False
+)
+
+pusher.push_data(df)
+```
+
+If `cache_path` is omitted (the default), caching is disabled entirely and `push_data` behaves exactly as without this feature - every call pushes the full input.
+
+**How it works:**
+- Before pushing, `push_data` filters out any datapoint whose key and value exactly match what's cached from a previous run.
+- After a push, only datapoints that DHIS2 actually accepted are recorded in the cache - a datapoint rejected by DHIS2 (see `rejected_datapoints` in the summary above) is left out, so it will be attempted again on the next run instead of being silently treated as done.
+- The cache is stored on disk as one `cache_<period>.parquet` file per period inside `cache_path`, so `cache_path` should point to a location that persists between pipeline runs (not a temporary directory), otherwise the cache provides no benefit.
+- If `dry_run` is `True` (the default), the cache is not used at all, even when `cache_path` is set: datapoints are not filtered against it, and it is not updated with the datapoints from this run. This keeps a dry run from marking datapoints as pushed when nothing was actually sent to DHIS2. Pass `dry_run=False` to enable the cache.
+
+**Performance tip:** if you push several distinct datasets (e.g. different extract groups) to the same DHIS2 instance, use a separate `cache_path` per dataset rather than sharing one. Each `cache_<period>.parquet` file is fully read and rewritten on every push, so a shared cache grows with the combined size of every dataset using it, not just the size of the one being pushed.
+
+```python
+base_cache_dir = Path("/path/to/persistent/cache")
+
+pusher_dataset_a = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_a", dry_run=False)
+pusher_dataset_a.push_data(df_a)
+
+pusher_dataset_b = DHIS2Pusher(dhis2_client, cache_path=base_cache_dir / "dataset_b", dry_run=False)
+pusher_dataset_b.push_data(df_b)
+```

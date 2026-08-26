@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 
 import pandas as pd
 import polars as pl
@@ -8,6 +9,7 @@ from openhexa.toolbox.dhis2 import DHIS2
 
 from .data_models import DataPointModel
 from .exceptions import PusherError
+from .push_cache import DHIS2PushCache
 from .utils import log_message
 
 
@@ -22,6 +24,7 @@ class DHIS2Pusher:
         max_post: int = 500,
         logging_interval: int = 50000,
         logger: logging.Logger | None = None,
+        cache_path: Path | None = None,
     ):
         """Initialize the DHIS2Pusher."""
         self.dhis2_client = dhis2_client
@@ -38,6 +41,7 @@ class DHIS2Pusher:
         self._reset_summary()
         self.logger = logger if logger else logging.getLogger(__name__)
         self.log_function = log_message
+        self._initialize_cache(cache_path)
 
     def push_data(
         self,
@@ -68,12 +72,16 @@ class DHIS2Pusher:
             self._log_message("Input DataFrame is empty. No data to push.")
             return
 
+        if self.push_cache:
+            df_data = self.push_cache.filter_new(df_data)
+
         valid, to_delete, to_ignore = self._classify_data_points(df_data)
 
         self._push_valid(valid)
         self._push_to_delete(to_delete)
         self._log_summary_errors()
         self._log_ignored_or_na(to_ignore)
+        self._update_cache_with(pl.concat([valid, to_delete]))
 
     def _validate_input_data(self, df_data: pl.DataFrame) -> None:
         """Validate that the input DataFrame contains all mandatory fields.
@@ -134,7 +142,9 @@ class DHIS2Pusher:
             self._log_message("No data to push.")
             return
 
-        self._log_message(f"Pushing {len(data_points_valid)} data points.")
+        self._log_message(f"Pushing {data_points_valid.height} data points.")
+        periods = sorted(data_points_valid["period"].unique().to_list())
+        self._log_message(f"Period(s): {', '.join(periods)}.")
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_valid))
         self._log_message(f"Data points push summary:  {self.summary['import_counts']}")
 
@@ -147,6 +157,49 @@ class DHIS2Pusher:
         self._log_ignored_or_na(data_points_to_delete, is_na=True)
         self._push_data_points(data_point_list=self._serialize_data_points(data_points_to_delete))
         self._log_message(f"Data points delete summary: {self.summary['import_counts']}")
+
+    def _initialize_cache(self, cache_path: Path | None) -> None:
+        """Initialize the cache for tracking pushed data points."""
+        if cache_path is None or self.dry_run:
+            self.push_cache = None
+            return
+
+        self.push_cache = DHIS2PushCache(cache_path=cache_path, logger=self.logger)
+
+    def _update_cache_with(self, data: pl.DataFrame) -> None:
+        """Update the cache with the latest pushed data points."""
+        if self.push_cache is not None:
+            self.push_cache.mark_pushed(self._remove_rejected_points(data))
+
+    def _remove_rejected_points(self, data: pl.DataFrame) -> pl.DataFrame:
+        """Remove data points that were rejected by DHIS2 from the DataFrame before updating the cache.
+
+        `rejected_datapoints` entries are the *serialized* DHIS2 payload (DHIS2-cased keys), so
+        rejected points are matched back to `data` by remapping to the internal key columns.
+
+        Returns
+        -------
+            pl.DataFrame: A DataFrame containing only the data points that were successfully pushed to DHIS2.
+        """
+        rejected = self.summary.get("rejected_datapoints", [])
+        if not rejected:
+            return data
+
+        key_columns = [c for c in self.mandatory_fields if c != "value"]
+        rejected_keys = pl.DataFrame(
+            [
+                {
+                    "dx": r["dataElement"],
+                    "period": r["period"],
+                    "org_unit": r["orgUnit"],
+                    "category_option_combo": r["categoryOptionCombo"],
+                    "attribute_option_combo": r["attributeOptionCombo"],
+                }
+                for r in rejected
+            ]
+        ).unique()
+
+        return data.join(rejected_keys, on=key_columns, how="anti")
 
     def _log_ignored_or_na(self, data_points: pl.DataFrame, is_na: bool = False):
         """Logs ignored or NA data points.
@@ -384,8 +437,6 @@ class DHIS2Pusher:
 
         # Extract rejected datapoints
         if rejected_indexes:
-            rejected_datapoints = [
-                {"index": idx, "datapoint": chunk[idx]} for idx in rejected_indexes if 0 <= idx < len(chunk)
-            ]
+            rejected_datapoints = [chunk[idx] for idx in rejected_indexes if 0 <= idx < len(chunk)]
             if rejected_datapoints:
                 self.summary.setdefault("rejected_datapoints", []).extend(rejected_datapoints)
