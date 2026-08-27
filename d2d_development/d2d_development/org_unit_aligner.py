@@ -209,6 +209,11 @@ class DHIS2PyramidAligner:
             else:
                 self._log_error_ou(ou.to_json(), import_strategy="create", error_type="invalid")
 
+        self._log_message(
+            f"Organisation units created: {len(self.summary['create']['created'])}/{len(ou_to_create)}.",
+            log_current_run=True,
+        )
+
     def _handle_org_unit_push(self, ou: OrgUnit, target_dhis2: DHIS2, import_strategy: str) -> None:
         """Handle the creation of an organisation unit in the target DHIS2 instance."""
         try:
@@ -256,9 +261,7 @@ class DHIS2PyramidAligner:
         self.summary[import_strategy][action_str].append(ou.to_json())
         self._log_message(f"Organisation unit {action_str}: {ou.to_json()}", level="info", log_current_run=False)
 
-    def _log_error_ou(
-        self, ou: dict, import_strategy: str, error_type: str, error_details: str | None = None
-    ) -> None:
+    def _log_error_ou(self, ou: dict, import_strategy: str, error_type: str, error_details: str | None = None) -> None:
         self.summary[import_strategy][error_type].append(ou)
         error_str = f"Error: {error_details}" if error_details else None
         self._log_message(
@@ -321,6 +324,10 @@ class DHIS2PyramidAligner:
 
             if progress_count % logging_interval == 0 or progress_count == total_ou:
                 self._log_message(f"Organisation units checked: {progress_count}/{total_ou} for update.")
+
+        self._log_message(
+            f"Organisation units updated: {len(self.summary['update']['updated'])}/{total_ou}.", log_current_run=True
+        )
 
     def _push_org_unit(
         self,
