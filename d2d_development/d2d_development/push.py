@@ -74,6 +74,9 @@ class DHIS2Pusher:
 
         if self.push_cache:
             df_data = self.push_cache.filter_new(df_data)
+            if df_data.height == 0:
+                self._log_message("All data points already pushed to DHIS2 (cache hit). Nothing to push.")
+                return
 
         valid, to_delete, to_ignore = self._classify_data_points(df_data)
 
