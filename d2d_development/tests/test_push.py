@@ -637,6 +637,34 @@ def test_push_data_with_cache_skips_unchanged_datapoints_on_second_run(tmp_path:
         assert mock_post.call_count == 1, "No new POST should happen: both datapoints were already cached."
 
 
+def test_push_data_with_cache_logs_and_skips_when_all_datapoints_cached(tmp_path: Path):
+    """Test that push_data() logs and returns early when filter_new() leaves nothing to push."""
+    pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=False)
+    data = pl.DataFrame(
+        {
+            "dx": ["AAA111"],
+            "period": ["202501"],
+            "org_unit": ["ORG001"],
+            "category_option_combo": ["CAT001"],
+            "attribute_option_combo": ["ATTR001"],
+            "value": ["10"],
+        }
+    )
+
+    with patch.object(
+        pusher.dhis2_client.api.session,
+        "post",
+        return_value=MockDHIS2Response(MOCK_DHIS2_OK_RESPONSE),
+    ) as mock_post:
+        pusher.push_data(data)  # first run: pushes and caches the datapoint
+
+        with patch.object(DHIS2Pusher, "_log_message") as mock_log_message:
+            pusher.push_data(data)  # second run: same data, already cached
+            mock_log_message.assert_any_call("All data points already pushed to DHIS2 (cache hit). Nothing to push.")
+
+        assert mock_post.call_count == 1, "No new POST should happen on the second run."
+
+
 def test_push_data_with_cache_writes_pushed_datapoints_to_disk(tmp_path: Path):
     """Test that a successful push_data() call with cache_path persists the pushed datapoints to disk."""
     pusher = DHIS2Pusher(dhis2_client=MockDHIS2Client(), cache_path=tmp_path, dry_run=False)
